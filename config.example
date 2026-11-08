@@ -1,0 +1,53 @@
+# remote-sessions settings: KEY=value lines, # starts a comment.
+# Every option is listed with its default and commented out, so this file changes nothing until you
+# remove the # in front of a line and edit its value. The environment variable REMOTE_SESSIONS_<KEY>
+# wins over the same key here. Details: README, "Configuration".
+
+# Folder that holds your projects; lists and names are relative to it
+# ROOT=~/Projects
+
+# auto, iterm, terminal (Terminal.app) or tmux (detached). auto: on macOS iTerm if installed, else
+# Terminal; elsewhere tmux
+# TERMINAL=auto
+
+# Command that starts Claude Code (for example a wrapper that loads secrets)
+# CLAUDE=claude
+
+# Shell command that must succeed before a session starts (empty: none)
+# PRECHECK=
+
+# Seconds the precheck may take; a timeout counts as a failure
+# PRECHECK_TIMEOUT=15
+
+# KEY=VALUE pairs added to the session when the precheck fails (empty: none)
+# PRECHECK_FAIL_ENV=
+
+# 1: for tmux sessions, run the precheck inside the tmux server (empty: off)
+# PRECHECK_IN_TMUX=
+
+# 1 (macOS): when no tmux server runs, start it from a short-lived terminal window first (empty: off)
+# TMUX_SERVER_VIA_TERMINAL=
+
+# Shell that runs the session command; /bin/zsh -lic loads your ~/.zshrc (aliases, functions)
+# RUN_SHELL=/bin/sh -c
+
+# KEY=VALUE pairs that --teams adds
+# TEAMS_ENV=CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1
+
+# KEY=VALUE pairs added to every tmux session (empty: none)
+# TMUX_ENV=
+
+# Command that names new sessions; gets the folder and the --name text (empty: "<folder> · <name>")
+# TITLE_CMD=
+
+# Session variables kept in the new session's environment, space separated (empty: none)
+# KEEP_ENV=
+
+# Extra variables removed from the new session, space separated; NAME_* removes a prefix (empty: none)
+# DROP_ENV=
+
+# claude-desk (macOS): the desktop app's session folder and log, and the ax-press helper
+# (empty AX_PRESS: built from tools/ax-press.swift on first use)
+# DESKTOP_SESSIONS=~/Library/Application Support/Claude/claude-code-sessions
+# DESKTOP_LOG=~/Library/Logs/Claude/main.log
+# AX_PRESS=

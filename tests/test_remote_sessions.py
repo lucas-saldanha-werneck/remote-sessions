@@ -4,7 +4,7 @@ Claude config folder and the desktop app folder are temporary, and `claude`, `os
 fakes that only record their arguments. Tests that need POSIX fake binaries skip on Windows.
 
 Run: python3 tests/test_remote_sessions.py -v"""
-import json, os, shutil, stat, subprocess, sys, tempfile, time, unittest
+import json, os, shlex, shutil, stat, subprocess, sys, tempfile, time, unittest, unittest.mock
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 BIN = os.path.join(ROOT, "bin")
@@ -253,6 +253,227 @@ class TestOpen(Base):
         self.assertIn("unknown terminal 'kitty'", r.stderr)
 
 
+class TestOptions(Base):
+    """The settings that let a personal setup live outside the plugin: --teams/TEAMS_ENV, TMUX_ENV,
+    RUN_SHELL, PRECHECK_IN_TMUX, TMUX_SERVER_VIA_TERMINAL, TITLE_CMD, DROP_ENV."""
+
+    def setUp(self):
+        super().setUp()
+        self.session("alpha", "a1111111-0000-0000-0000-000000000001", first="fix the parser", age=100)
+
+    def test_teams_default_and_custom_env(self):
+        r = self.run_cmd("claude-open", "alpha", "--teams", "--tmux", "--dry-run")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1 ", r.stdout)
+        r = self.run_cmd("claude-open", "alpha", "--resume", "last", "--teams", "--dry-run",
+                         env={"REMOTE_SESSIONS_TEAMS_ENV": "TEAMS_A=1 'TEAMS_B=x y'"})
+        self.assertIn("TEAMS_A=1 TEAMS_B='x y' ", r.stdout)
+        self.assertIn("--resume a1111111", r.stdout)
+        r = self.run_cmd("claude-open", "alpha", "--tmux", "--dry-run")
+        self.assertNotIn("AGENT_TEAMS", r.stdout)
+
+    def test_tmux_env_only_for_tmux(self):
+        e = {"REMOTE_SESSIONS_TMUX_ENV": "UNATTENDED=1"}
+        r = self.run_cmd("claude-open", "alpha", "--tmux", "--dry-run", env=e)
+        self.assertIn("UNATTENDED=1 ", r.stdout)
+        r = self.run_cmd("claude-open", "alpha", "--dry-run", env=dict(e, REMOTE_SESSIONS_TERMINAL="iterm"))
+        self.assertNotIn("UNATTENDED", r.stdout)
+
+    @POSIX_ONLY
+    def test_run_shell_for_tmux_and_window(self):
+        e = {"REMOTE_SESSIONS_RUN_SHELL": "/bin/bash -lc"}
+        r = self.run_cmd("claude-open", "alpha", "--tmux", env=e)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        c = self.calls().split("\n")
+        i = c.index("new-session")
+        self.assertEqual(c[i + 6:i + 8], ["/bin/bash", "-lc"])
+        r = self.run_cmd("claude-open", "alpha", env=dict(e, REMOTE_SESSIONS_TERMINAL="iterm"))
+        self.assertIn('write text "/bin/bash -lc ', self.calls())
+
+    @POSIX_ONLY
+    def test_precheck_in_tmux(self):
+        marker = os.path.join(self.tmp, "precheck-ran")
+        write(os.path.join(self.fakebin, "tmux"), FAKE_RECORDER.replace(
+            "exit 0", '[ "$1" = run-shell ] && exit 3\nexit 0'), 0o755)
+        e = {"REMOTE_SESSIONS_PRECHECK": f"touch '{marker}'", "REMOTE_SESSIONS_PRECHECK_FAIL_ENV": "NO_SECRETS=1",
+             "REMOTE_SESSIONS_PRECHECK_IN_TMUX": "1"}
+        r = self.run_cmd("claude-open", "alpha", "--tmux", env=e)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        c = self.calls().split("\n")
+        self.assertIn("run-shell", c)
+        self.assertEqual(c[c.index("run-shell") + 1], "sh -c " + shlex.quote(f"touch '{marker}'") + " >/dev/null 2>&1")
+        self.assertFalse(os.path.exists(marker))                 # ran in the (fake) tmux server, not here
+        self.assertIn("NO_SECRETS=1 ", c[c.index("new-session") + 8])
+        r = self.run_cmd("claude-open", "alpha", "--tmux", env=dict(e, REMOTE_SESSIONS_PRECHECK_IN_TMUX="0"))
+        self.assertTrue(os.path.exists(marker))                  # off: runs with /bin/sh in this process
+
+    @POSIX_ONLY
+    def test_tmux_server_via_terminal(self):
+        up = os.path.join(self.tmp, "server-up")
+        write(os.path.join(self.fakebin, "tmux"), FAKE_RECORDER.replace(
+            "exit 0", f'[ "$1" = list-sessions ] && [ ! -e "{up}" ] && exit 1\nexit 0'), 0o755)
+        write(os.path.join(self.fakebin, "osascript"), FAKE_RECORDER.replace("exit 0", f'touch "{up}"\nexit 0'), 0o755)
+        e = {"REMOTE_SESSIONS_TMUX_SERVER_VIA_TERMINAL": "1", "REMOTE_SESSIONS_TERMINAL": "terminal"}
+        r = self.run_cmd("claude-open", "alpha", "--tmux", env=e)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        c = self.calls()
+        self.assertIn("new-session -d -s remote-sessions-keepalive; exit", c)
+        self.assertLess(c.index("== osascript"), c.index("\nnew-session\n"))
+        os.remove(self.log)
+        r = self.run_cmd("claude-open", "alpha", "--tmux", env=e)   # server up now: no window
+        self.assertNotIn("osascript", self.calls())
+        os.remove(up)
+        os.remove(self.log)
+        r = self.run_cmd("claude-open", "alpha", "--tmux")          # option off: no window either
+        self.assertNotIn("osascript", self.calls())
+
+    @POSIX_ONLY
+    def test_title_command(self):
+        script = os.path.join(self.tmp, "title.py").replace("\\", "/")
+        write(script, "import os, sys\nprint('T:' + os.path.basename(sys.argv[1]) + ':' + sys.argv[2])\n")
+        e = {"REMOTE_SESSIONS_TITLE_CMD": f'"{PY}" "{script}"'}
+        r = self.run_cmd("claude-open", "alpha", "--name", "parser", "--tmux", env=e)
+        self.assertIn("--remote-control T:alpha:parser -n T:alpha:parser", r.stdout)
+        r = self.run_cmd("claude-open", "alpha", "--tmux", env=e)
+        self.assertIn("--remote-control T:alpha:", r.stdout)
+        r = self.run_cmd("claude-open", "alpha", "--name", "parser", "--tmux",
+                         env={"REMOTE_SESSIONS_TITLE_CMD": f'"{PY}" -c "import sys; sys.exit(1)"'})
+        self.assertIn("--remote-control 'alpha · parser'", r.stdout)   # failure: built-in title
+
+    # ---- review fixes (each test failed on the code before the fix) ----
+
+    @POSIX_ONLY
+    def test_r1_precheck_in_tmux_without_server_runs_here(self):
+        marker = os.path.join(self.tmp, "precheck-ran")
+        write(os.path.join(self.fakebin, "tmux"), FAKE_RECORDER.replace(
+            "exit 0", '[ "$1" = list-sessions ] && exit 1\n[ "$1" = run-shell ] && exit 1\nexit 0'), 0o755)
+        r = self.run_cmd("claude-open", "alpha", "--tmux", env={
+            "REMOTE_SESSIONS_PRECHECK": f"touch '{marker}'", "REMOTE_SESSIONS_PRECHECK_IN_TMUX": "1"})
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertNotIn("warning: the precheck", r.stdout)
+        self.assertIn("no tmux server is running", r.stdout)
+        self.assertTrue(os.path.exists(marker))
+        self.assertNotIn("run-shell", self.calls())
+
+    @POSIX_ONLY
+    def test_r2_precheck_in_tmux_is_quoted_and_hash_escaped(self):
+        cmd = "test -n '#{pane_id}' && exit 0"
+        r = self.run_cmd("claude-open", "alpha", "--tmux", env={
+            "REMOTE_SESSIONS_PRECHECK": cmd, "REMOTE_SESSIONS_PRECHECK_IN_TMUX": "1"})
+        self.assertEqual(r.returncode, 0, r.stderr)
+        c = self.calls().split("\n")
+        arg = c[c.index("run-shell") + 1]
+        self.assertEqual(arg, ("sh -c " + shlex.quote(cmd) + " >/dev/null 2>&1").replace("#", "##"))
+
+    def test_r3_bad_env_settings_fail_cleanly(self):
+        for key in ("REMOTE_SESSIONS_TEAMS_ENV", "REMOTE_SESSIONS_RUN_SHELL"):
+            r = self.run_cmd("claude-open", "alpha", "--teams", "--tmux", "--dry-run", env={key: "'unbalanced"})
+            self.assertNotEqual(r.returncode, 0)
+            self.assertNotIn("Traceback", r.stderr)
+            self.assertIn(f"claude-open: {key}", r.stderr)
+        r = self.run_cmd("claude-open", "alpha", "--tmux", "--dry-run",
+                         env={"REMOTE_SESSIONS_TMUX_ENV": "GOOD=1 junk"})
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("GOOD=1 ", r.stdout)
+        self.assertIn("REMOTE_SESSIONS_TMUX_ENV: ignored ['junk']", r.stderr)
+
+    @POSIX_ONLY
+    def test_r4_bad_timeout_and_inline_comment(self):
+        write(self.env["REMOTE_SESSIONS_CONFIG"], "PRECHECK=true\nPRECHECK_TIMEOUT=soon\nTERMINAL=tmux   # detached\n")
+        r = self.run_cmd("claude-open", "alpha")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertNotIn("Traceback", r.stderr)
+        self.assertIn("REMOTE_SESSIONS_PRECHECK_TIMEOUT='soon' is not a positive number; using 15", r.stderr)
+        self.assertIn("new-session", self.calls())                 # TERMINAL=tmux, the comment dropped
+
+    def test_r4_comment_rules(self):
+        self.assertEqual(rs._strip_comment("tmux  # c"), "tmux")
+        self.assertEqual(rs._strip_comment("a#b"), "a#b")
+        self.assertEqual(rs._strip_comment("'x # y' # z"), "'x # y'")
+
+    @POSIX_ONLY
+    def test_r5_osascript_failure_falls_back(self):
+        write(os.path.join(self.fakebin, "tmux"), FAKE_RECORDER.replace(
+            "exit 0", '[ "$1" = list-sessions ] && exit 1\nexit 0'), 0o755)
+        write(os.path.join(self.fakebin, "osascript"), FAKE_RECORDER.replace("exit 0", "exit 1"), 0o755)
+        r = self.run_cmd("claude-open", "alpha", "--tmux", env={"REMOTE_SESSIONS_TMUX_SERVER_VIA_TERMINAL": "1",
+                                                                "REMOTE_SESSIONS_TERMINAL": "terminal"})
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("could not open a terminal window for the tmux server", r.stdout)
+        self.assertIn("starting it from here", r.stdout)
+        self.assertIn("\nnew-session\n", self.calls())
+
+    @POSIX_ONLY
+    def test_r6_terminal_setting_and_keepalive_removed(self):
+        up = os.path.join(self.tmp, "server-up")
+        write(os.path.join(self.fakebin, "tmux"), FAKE_RECORDER.replace(
+            "exit 0", f'[ "$1" = list-sessions ] && [ ! -e "{up}" ] && exit 1\nexit 0'), 0o755)
+        write(os.path.join(self.fakebin, "osascript"), FAKE_RECORDER.replace("exit 0", f'touch "{up}"\nexit 0'), 0o755)
+        r = self.run_cmd("claude-open", "alpha", "--tmux", env={"REMOTE_SESSIONS_TMUX_SERVER_VIA_TERMINAL": "1",
+                                                                "REMOTE_SESSIONS_TERMINAL": "iterm"})
+        self.assertEqual(r.returncode, 0, r.stderr)
+        c = self.calls()
+        self.assertIn('tell application "iTerm"', c)              # TERMINAL honored, not "iTerm installed?"
+        self.assertLess(c.index("\nnew-session\n"), c.index("\nkill-session\n-t\nremote-sessions-keepalive"))
+
+    def test_r7_dry_run_does_not_run_title_command(self):
+        marker = os.path.join(self.tmp, "title-ran").replace("\\", "/")
+        script = os.path.join(self.tmp, "title2.py").replace("\\", "/")
+        write(script, f"open({marker!r}, 'w').close()\nprint('T')\n")
+        r = self.run_cmd("claude-open", "alpha", "--name", "x", "--tmux", "--dry-run",
+                         env={"REMOTE_SESSIONS_TITLE_CMD": f'"{PY}" "{script}"'})
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertFalse(os.path.exists(marker))
+
+    def test_r8_multi_token_value_keeps_its_quotes(self):
+        write(self.env["REMOTE_SESSIONS_CONFIG"], "TEAMS_ENV='A=x y' 'B=z'\nCLAUDE_ONE='one value'\n")
+        r = self.run_cmd("claude-open", "alpha", "--teams", "--tmux", "--dry-run")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("A='x y' B=z ", r.stdout)
+        self.assertEqual(rs._unquote("'one value'"), "one value")
+
+    def test_r9_drop_env_cannot_remove_own_settings(self):
+        r = self.run_cmd("claude-open", "alpha", "--list", env={"REMOTE_SESSIONS_DROP_ENV": "REMOTE_SESSIONS_* REMOTE_*"})
+        self.assertEqual(r.returncode, 0, r.stderr)                # ROOT still read: the folder is found
+        self.assertEqual(json.loads(r.stdout)["folder"], "alpha")
+        self.assertIn("is ignored: it would remove REMOTE_SESSIONS_ settings", r.stderr)
+
+    def test_r10_config_read_once(self):
+        old = dict(os.environ)
+        try:
+            path = os.path.join(self.tmp, "cfg-once")
+            write(path, "TERMINAL=tmux\n")
+            os.environ["REMOTE_SESSIONS_CONFIG"] = path
+            rs._CONFIG = None
+            calls = []
+            real = rs._read_config
+            with unittest.mock.patch.object(rs, "_read_config", lambda: calls.append(1) or real()):
+                for _ in range(5):
+                    self.assertEqual(rs.setting("TERMINAL"), "tmux")
+            self.assertEqual(len(calls), 1)
+        finally:
+            rs._CONFIG = None
+            os.environ.clear()
+            os.environ.update(old)
+
+    def test_drop_env(self):
+        old = dict(os.environ)
+        try:
+            os.environ.update({"REMOTE_SESSIONS_DROP_ENV": "WRAP_ACTIVE MYTOOL_* bad-name",
+                               "WRAP_ACTIVE": "1", "MYTOOL_X": "1", "OTHER": "1"})
+            snippet = rs.unset_snippet()
+            self.assertIn(" WRAP_ACTIVE ", snippet + " ")
+            self.assertIn("MYTOOL_", snippet)
+            self.assertNotIn("bad-name", snippet)
+            rs.scrub_env()
+            self.assertNotIn("WRAP_ACTIVE", os.environ)
+            self.assertNotIn("MYTOOL_X", os.environ)
+            self.assertIn("OTHER", os.environ)
+        finally:
+            os.environ.clear()
+            os.environ.update(old)
+
+
 class TestLib(unittest.TestCase):
     def test_applescript_escaping(self):
         self.assertEqual(rs.applescript_string('a "b" \\c'), '"a \\"b\\" \\\\c"')
@@ -345,6 +566,133 @@ class TestDesk(Base):
             self.assertIn("no desktop session matches", r.stderr)
         else:
             self.assertIn("macOS only", r.stderr)
+
+
+class SeedConfig(Base):
+    """The first run creates ~/.config/remote-sessions/config from config.example, and never touches a file
+    that already exists."""
+    STARTER = os.path.join(ROOT, "config.example")
+
+    def setUp(self):
+        super().setUp()
+        del self.env["REMOTE_SESSIONS_CONFIG"]
+        self.dest = os.path.join(self.tmp, ".config", "remote-sessions", "config")
+
+    def seed(self, **env):
+        return subprocess.run([sys.executable, os.path.join(ROOT, "lib", "remote_sessions.py"), "--seed"],
+                              capture_output=True, text=True, env=dict(self.env, **env))
+
+    def bytes(self, p):
+        with open(p, "rb") as f:
+            return f.read()
+
+    def test_missing_config_is_created_with_the_defaults(self):
+        r = self.seed()
+        self.assertEqual((r.returncode, r.stdout, r.stderr), (0, "", ""))
+        self.assertEqual(self.bytes(self.dest), self.bytes(self.STARTER))
+
+    def test_each_command_seeds_on_first_use(self):
+        # claude-fork with a bad id: a real run that stops before opening anything
+        for cmd, args in (("claude-open", ["--projects"]), ("claude-fork", ["not-an-id"]), ("claude-desk", ["--list"])):
+            if os.path.exists(self.dest):
+                os.remove(self.dest)
+            self.run_cmd(cmd, *args)
+            self.assertEqual(self.bytes(self.dest), self.bytes(self.STARTER), cmd)
+
+    def test_seed_uses_the_file_that_was_read_even_if_drop_env_removes_xdg(self):
+        # DROP_ENV may remove XDG_CONFIG_HOME before the new window opens; the seed must still look where
+        # the settings were read from, not create a second file under ~/.config.
+        xdg = os.path.join(self.tmp, "xdg")
+        os.makedirs(os.path.join(xdg, "remote-sessions"))
+        with open(os.path.join(xdg, "remote-sessions", "config"), "w") as f:
+            f.write("# mine\n")
+        for cmd, args in (("claude-open", ["--projects"]), ("claude-fork", ["not-an-id"]), ("claude-desk", ["--list"])):
+            self.run_cmd(cmd, *args, env={"XDG_CONFIG_HOME": xdg, "REMOTE_SESSIONS_DROP_ENV": "XDG_CONFIG_HOME"})
+            self.assertFalse(os.path.exists(self.dest), cmd)
+
+    def test_help_and_dry_run_leave_a_missing_config_missing(self):
+        self.session("acme/api", "11111111-0000-4000-8000-000000000001", title="t")
+        runs = [("claude-open", []), ("claude-open", ["--help"]), ("claude-open", ["-h"]),
+                ("claude-open", ["acme/api", "--dry-run", "--tmux"]),
+                ("claude-fork", ["--help"]), ("claude-fork", ["11111111-0000-4000-8000-000000000001", "--dry-run"]),
+                ("claude-desk", []), ("claude-desk", ["--help"])]
+        for cmd, args in runs:
+            self.run_cmd(cmd, *args)
+            self.assertFalse(os.path.exists(os.path.join(self.tmp, ".config")), (cmd, args))
+
+    def test_existing_config_is_never_changed(self):
+        os.makedirs(os.path.dirname(self.dest))
+        with open(self.dest, "wb") as f:
+            f.write(b"TERMINAL=tmux\r\n")
+        os.utime(self.dest, (1000000000, 1000000000))
+        for _ in range(2):
+            self.assertEqual(self.seed().returncode, 0)
+            self.run_cmd("claude-open", "--projects")
+        self.assertEqual(self.bytes(self.dest), b"TERMINAL=tmux\r\n")
+        self.assertEqual(os.stat(self.dest).st_mtime, 1000000000)
+
+    def test_env_overrides_are_respected(self):
+        alt = os.path.join(self.tmp, "alt", "rs.conf")
+        x = os.path.join(self.tmp, "x")
+        self.assertEqual(self.seed(REMOTE_SESSIONS_CONFIG=alt, XDG_CONFIG_HOME=x).returncode, 0)
+        self.assertEqual(self.bytes(alt), self.bytes(self.STARTER))
+        self.assertFalse(os.path.exists(x))
+        self.assertFalse(os.path.exists(os.path.join(self.tmp, ".config")))
+        xdg = os.path.join(self.tmp, "xdg")
+        self.assertEqual(self.seed(XDG_CONFIG_HOME=xdg).returncode, 0)
+        self.assertEqual(self.bytes(os.path.join(xdg, "remote-sessions", "config")), self.bytes(self.STARTER))
+        self.assertFalse(os.path.exists(os.path.join(self.tmp, ".config")))
+
+    def test_unwritable_place_does_not_crash(self):
+        write(os.path.join(self.tmp, ".config"), "x")   # a file where the folder should be
+        r = self.seed()
+        self.assertEqual((r.returncode, r.stdout, r.stderr), (0, "", ""))
+        r = self.run_cmd("claude-open", "--projects")
+        self.assertEqual(r.returncode, 0, r.stderr)
+
+    @unittest.skipIf(os.name == "nt" or (hasattr(os, "geteuid") and os.geteuid() == 0),
+                     "read-only folders are not enforced for Windows or root")
+    def test_read_only_folder_does_not_crash(self):
+        cfgdir = os.path.join(self.tmp, ".config")
+        os.makedirs(cfgdir)
+        os.chmod(cfgdir, 0o500)
+        try:
+            r = self.seed()
+            self.assertEqual((r.returncode, r.stderr), (0, ""))
+            self.assertEqual(os.listdir(cfgdir), [])
+        finally:
+            os.chmod(cfgdir, 0o700)
+
+    def test_seeded_config_behaves_like_no_config(self):
+        """The starter sets nothing: every key listed in it resolves to the same value as with no file, and a
+        whole dry run prints the same."""
+        code = ("import json,sys; sys.path.insert(0, sys.argv[1]); import remote_sessions as rs; "
+                "keys = sorted(l[2:].split('=')[0] for l in open(sys.argv[2]) "
+                "if l.startswith('# ') and '=' in l and l[2:].split('=')[0].isupper()); "
+                "print(json.dumps([rs._config(), {k: rs.setting(k, 'DEFAULT') for k in keys}]))")
+        env = {k: v for k, v in self.env.items() if not k.startswith("REMOTE_SESSIONS_")}
+        self.session("acme/api", "11111111-0000-4000-8000-000000000001", title="t")
+        outs = []
+        for seeded in (False, True):
+            if seeded:
+                self.assertEqual(self.seed().returncode, 0)
+                self.assertTrue(os.path.isfile(self.dest))
+            else:
+                self.assertFalse(os.path.exists(self.dest))
+            r = subprocess.run([sys.executable, "-c", code, os.path.join(ROOT, "lib"), self.STARTER],
+                               capture_output=True, text=True, env=env)
+            self.assertEqual(r.returncode, 0, r.stderr)
+            # a whole dry run with no config (path blocked, so nothing is seeded) and with the seeded file
+            blocked = os.path.join(self.tmp, "blocker")
+            write(blocked, "x")
+            cfg = self.dest if seeded else os.path.join(blocked, "config")
+            dry = self.run_cmd("claude-open", "acme/api", "--dry-run", "--tmux", env={"REMOTE_SESSIONS_CONFIG": cfg})
+            outs.append((json.loads(r.stdout), dry.returncode, dry.stdout, dry.stderr))
+        self.assertEqual(outs[0][0][0], {})
+        self.assertEqual(outs[0][1], 0, outs[0][3])
+        self.assertIn("api", outs[0][2])
+        self.assertEqual(outs[0], outs[1])
+        self.assertGreater(len(outs[0][0][1]), 15)   # every key of the starter was checked
 
 
 if __name__ == "__main__":

@@ -21,6 +21,9 @@ import remote_sessions as rs  # noqa: E402
 
 
 def main():
+    # first real run: create ~/.config/remote-sessions/config from the starter (never changes it; --help and
+    # --dry-run write nothing)
+    rs.seed_for_run(sys.argv[1:])
     own = os.environ.get("CLAUDE_CODE_SESSION_ID", "")
     rs.scrub_env()
     argv, opts, args = sys.argv[1:], {}, []
@@ -55,7 +58,11 @@ def main():
     if not os.path.isdir(folder):
         raise rs.Fail(f"folder not found: {folder}")
 
-    env = [] if opts.get("--dry-run") else rs.precheck_env()
+    env, started_keepalive = [], False
+    if not opts.get("--dry-run"):
+        if rs.tmux_bin():
+            started_keepalive = rs.ensure_tmux_server()
+        env = rs.precheck_env(in_tmux=bool(rs.tmux_bin()))
     claude = " ".join(env + [rs.claude_cmd(), "--resume", shlex.quote(sid), "--fork-session",
                              "--remote-control", shlex.quote(name), "-n", shlex.quote(name)])
     script = rs.unset_snippet() + f"cd {shlex.quote(folder)} && " + claude
@@ -79,6 +86,8 @@ def main():
 
     if tmux:
         rs.start_tmux(session, folder, script)
+        if started_keepalive:
+            rs.drop_keepalive()
         print(f"tmux: {session}")
         if window:
             rs.open_window(window, f"{shlex.quote(tmux)} attach -t {session}")

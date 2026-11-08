@@ -214,6 +214,9 @@ def new_session(a):
 
 
 def main():
+    # first real run: create ~/.config/remote-sessions/config from the starter (never changes it; --help and
+    # --dry-run write nothing). Before scrub_env: DROP_ENV may remove XDG_CONFIG_HOME, which names the file.
+    rs.seed_for_run(sys.argv[1:], empty_is_help=True)
     rs.scrub_env()
     a = sys.argv[1:]
     if not a or a[0] in ("-h", "--help"):

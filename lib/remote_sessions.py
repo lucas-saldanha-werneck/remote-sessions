@@ -13,10 +13,34 @@ Configuration (environment variable wins over the config file):
                            (file key: PRECHECK_FAIL_ENV)
   REMOTE_SESSIONS_KEEP_ENV names that must NOT be removed from the new session's environment
                            (file key: KEEP_ENV, space separated)
+  REMOTE_SESSIONS_DROP_ENV extra names removed from the new session's environment (file key: DROP_ENV,
+                           space separated; NAME_* removes every name with that prefix)
+  REMOTE_SESSIONS_PRECHECK_TIMEOUT
+                           seconds the precheck may take (file key: PRECHECK_TIMEOUT, default 15)
+  REMOTE_SESSIONS_PRECHECK_IN_TMUX
+                           1 = for --tmux sessions, run the precheck inside the tmux server with
+                           `tmux run-shell`, where the session itself will run (file key: PRECHECK_IN_TMUX).
+                           On macOS a launchd job may lack file permissions (TCC) that the tmux server,
+                           started from a terminal, has.
+  REMOTE_SESSIONS_TMUX_SERVER_VIA_TERMINAL
+                           1 = on macOS, when no tmux server runs, start it from a terminal window first
+                           (file key: TMUX_SERVER_VIA_TERMINAL), so it inherits the terminal's permissions
+  REMOTE_SESSIONS_RUN_SHELL
+                           shell that runs the session command (file key: RUN_SHELL, default `/bin/sh -c`).
+                           `/bin/zsh -lic` makes shell functions and aliases from ~/.zshrc apply, such as a
+                           `claude` wrapper function
+  REMOTE_SESSIONS_TEAMS_ENV
+                           KEY=VALUE pairs that --teams adds (file key: TEAMS_ENV,
+                           default CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1)
+  REMOTE_SESSIONS_TMUX_ENV KEY=VALUE pairs added to every --tmux session (file key: TMUX_ENV)
+  REMOTE_SESSIONS_TITLE_CMD
+                           command that names new sessions (file key: TITLE_CMD). It gets the folder path
+                           and the --name text (maybe empty) as two arguments; its first output line is the
+                           title. Empty output or a failure keeps the built-in "<folder> · <name>"
   CLAUDE_CONFIG_DIR        Claude Code's config folder (default ~/.claude); sessions are read from
                            its projects/ subfolder
 """
-import datetime, difflib, glob, json, os, re, shlex, shutil, subprocess, sys, unicodedata
+import datetime, difflib, glob, json, os, re, shlex, shutil, subprocess, sys, time, unicodedata
 
 SKIP = re.compile(r"^(\.|node_modules$|__pycache__$)")
 DATE_FMT = "%Y-%m-%d %H:%M"
@@ -34,6 +58,10 @@ SESSION_ENV = [
 SESSION_ENV_PREFIXES = ("CLAUDE_AGENT_SDK_", "CLAUDE_PREVIEW_")
 
 
+OWN = "REMOTE_SESSIONS_"          # our own settings: never removed by DROP_ENV
+KEEPALIVE = "remote-sessions-keepalive"
+
+
 class Fail(Exception):
     """A user-facing error: printed as one line, exit code 1."""
 
@@ -46,6 +74,28 @@ def _config_file():
         "remote-sessions", "config")
 
 
+def _strip_comment(v):
+    """Drops a trailing ` # comment` (a # after whitespace, outside quotes)."""
+    quote = None
+    for i, c in enumerate(v):
+        if quote:
+            if c == quote:
+                quote = None
+        elif c in "\"'":
+            quote = c
+        elif c == "#" and (i == 0 or v[i - 1].isspace()):
+            return v[:i].rstrip()
+    return v
+
+
+def _unquote(v):
+    """Removes the surrounding quotes only when the whole value is ONE quoted token: `'a b'` -> `a b`, but
+    `'A=x y' 'B=z'` stays as written (it is two tokens for the setting that splits it)."""
+    if len(v) >= 2 and v[0] == v[-1] and v[0] in "\"'" and v[0] not in v[1:-1]:
+        return v[1:-1]
+    return v
+
+
 def _read_config():
     out = {}
     try:
@@ -55,20 +105,91 @@ def _read_config():
                 if not line or line.startswith("#") or "=" not in line:
                     continue
                 k, v = line.split("=", 1)
-                v = v.strip()
-                if len(v) >= 2 and v[0] == v[-1] and v[0] in "\"'":
-                    v = v[1:-1]
-                out[k.strip()] = v
+                out[k.strip()] = _unquote(_strip_comment(v.strip()))
     except OSError:
         pass
     return out
 
 
+# The starter config: config.example at the plugin / repo root (install.sh links to the clone, so it is there too).
+STARTER = os.path.join(os.path.dirname(os.path.dirname(os.path.realpath(__file__))), "config.example")
+
+
+def seed_for_run(argv, empty_is_help=False):
+    """The commands' first real run creates the config (seed_config). --help, -h and --dry-run write nothing,
+    nor does no argument at all where that only prints the help (empty_is_help)."""
+    if (argv or not empty_is_help) and not {"-h", "--help", "--dry-run"} & set(argv):
+        seed_config()
+
+
+def seed_config(dest=None, starter=None):
+    """First run: copy the starter to the config file when that file does not exist, creating its folder.
+    Never overwrites or changes an existing file, never raises, prints nothing. Returns the path it wrote,
+    else None. The starter has every option commented out, so it behaves exactly like no file."""
+    try:
+        dest = dest or _config_file()
+        starter = starter or STARTER
+        if os.path.lexists(dest) or not os.path.isfile(starter):
+            return None
+        with open(starter, "rb") as fh:
+            data = fh.read()
+        os.makedirs(os.path.dirname(os.path.abspath(dest)), exist_ok=True)
+        # O_EXCL: a file that appears between the check and here is left alone
+        fd = os.open(dest, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_BINARY", 0), 0o644)
+        try:
+            with os.fdopen(fd, "wb") as fh:
+                fh.write(data)
+        except Exception:
+            try:
+                os.remove(dest)   # created by us a moment ago: do not leave half a file
+            except OSError:
+                pass
+            return None
+        return dest
+    except Exception:
+        return None
+
+
+_CONFIG = None
+
+
+def _config():
+    """The config file, read once per process."""
+    global _CONFIG
+    if _CONFIG is None:
+        _CONFIG = _read_config()
+    return _CONFIG
+
+
 def setting(key, default=None):
     v = os.environ.get("REMOTE_SESSIONS_" + key)
     if v is None:
-        v = _read_config().get(key)
+        v = _config().get(key)
     return default if v in (None, "") else v
+
+
+def number(key, default):
+    """A numeric setting; anything that is not a positive number falls back to `default` with a warning."""
+    raw = setting(key)
+    if raw is None:
+        return default
+    try:
+        v = float(raw)
+        if v > 0:
+            return v
+    except ValueError:
+        pass
+    print(f"warning: REMOTE_SESSIONS_{key}={raw!r} is not a positive number; using {default:g}", file=sys.stderr)
+    return default
+
+
+def split_setting(key, default=""):
+    """A setting split like a shell line. Unbalanced quotes are a clear error, not a traceback."""
+    raw = setting(key, default) or ""
+    try:
+        return shlex.split(raw)
+    except ValueError as e:
+        raise Fail(f"REMOTE_SESSIONS_{key} ({raw!r}) cannot be split like a shell line: {e}")
 
 
 def expand(p):
@@ -116,13 +237,32 @@ for _s in (sys.stdout, sys.stderr):  # titles may hold any character; Windows co
 
 # ---------------------------------------------------------------- environment hygiene
 
+def drop_lists():
+    """(names, prefixes) to remove from a new session: the built-in lists plus REMOTE_SESSIONS_DROP_ENV
+    (space separated; a name ending in * is a prefix, e.g. MY_WRAPPER_*)."""
+    extra = []
+    for n in (setting("DROP_ENV", "") or "").split():
+        base = n[:-1] if n.endswith("*") else n
+        # a name or prefix that would cover REMOTE_SESSIONS_* would delete our settings before they are read
+        if base.startswith(OWN) or (n.endswith("*") and OWN.startswith(base)):
+            print(f"warning: REMOTE_SESSIONS_DROP_ENV entry {n!r} is ignored: it would remove REMOTE_SESSIONS_ "
+                  f"settings", file=sys.stderr)
+            continue
+        extra.append(n)
+    names = SESSION_ENV + [n for n in extra if not n.endswith("*") and re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", n)]
+    prefixes = SESSION_ENV_PREFIXES + tuple(n[:-1] for n in extra
+                                            if n.endswith("*") and re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", n[:-1]))
+    return names, prefixes
+
+
 def scrub_env():
     """Removes the parent session's variables from this process (they would reach the new window)."""
     keep = keep_env()
+    names, prefixes = drop_lists()
     for k in list(os.environ):
-        if k in keep:
+        if k in keep or k.startswith(OWN):
             continue
-        if k in SESSION_ENV or k.startswith(SESSION_ENV_PREFIXES):
+        if k in names or k.startswith(prefixes):
             del os.environ[k]
 
 
@@ -130,8 +270,9 @@ def unset_snippet():
     """POSIX sh code that removes the same variables inside the new window. Needed because a terminal app
     that was itself started from a Claude session passes them to every new window."""
     keep = keep_env()
-    names = [n for n in SESSION_ENV if n not in keep]
-    pat = ";".join(f"s/^\\({p}[A-Za-z0-9_]*\\)=.*/\\1/p" for p in SESSION_ENV_PREFIXES)
+    all_names, prefixes = drop_lists()
+    names = [n for n in all_names if n not in keep]
+    pat = ";".join(f"s/^\\({p}[A-Za-z0-9_]*\\)=.*/\\1/p" for p in prefixes)
     out = f"unset {' '.join(names)} 2>/dev/null; " if names else ""
     keep_case = " ".join(sorted(keep))
     out += (f"for v in $(env | sed -n '{pat}'); do case \" {keep_case} \" in *\" $v \"*) ;; "
@@ -356,20 +497,48 @@ def list_projects(root, prefix):
 
 # ---------------------------------------------------------------- precheck
 
-def precheck_env():
+def env_pairs(key, default=""):
+    """KEY=VALUE pairs from a setting (shell-style quoting allowed), ready to put before a command."""
+    out, dropped = [], []
+    for a in split_setting(key, default):
+        if re.match(r"^[A-Za-z_][A-Za-z0-9_]*=", a):
+            k, v = a.split("=", 1)
+            out.append(f"{k}={shlex.quote(v)}")
+        else:
+            dropped.append(a)
+    if dropped:
+        print(f"warning: REMOTE_SESSIONS_{key}: ignored {dropped} (not KEY=VALUE)", file=sys.stderr)
+    return out
+
+
+def flag(key):
+    return (setting(key, "") or "").lower() in ("1", "true", "yes", "on")
+
+
+def precheck_env(in_tmux=False):
     """Runs REMOTE_SESSIONS_PRECHECK (if set). Returns extra KEY=VALUE pairs for the session when it
-    fails or times out, and prints a warning. Without a precheck, returns []."""
+    fails or times out, and prints a warning. Without a precheck, returns [].
+    in_tmux: the session will run in tmux; with PRECHECK_IN_TMUX=1 the check runs there too."""
     cmd = setting("PRECHECK")
     if not cmd:
         return []
+    timeout = number("PRECHECK_TIMEOUT", 15.0)
+    argv = ["/bin/sh", "-c", cmd]
+    if in_tmux and flag("PRECHECK_IN_TMUX") and tmux_bin():
+        if tmux_server_running():
+            # run-shell expands #{...} formats, so '#' is doubled; sh -c keeps a compound command whole
+            inner = "sh -c " + shlex.quote(cmd) + " >/dev/null 2>&1"
+            argv = [tmux_bin(), "run-shell", inner.replace("#", "##")]
+        else:
+            print("note: no tmux server is running, so the precheck runs here instead of inside tmux")
     try:
-        ok = subprocess.run(["/bin/sh", "-c", cmd], capture_output=True, timeout=15).returncode == 0
+        ok = subprocess.run(argv, capture_output=True, timeout=timeout).returncode == 0
     except (subprocess.TimeoutExpired, OSError):
         ok = False
     if ok:
         return []
-    extra = (setting("PRECHECK_FAIL_ENV", "") or "").split()
-    print(f"warning: the precheck `{cmd}` failed or took over 15 s; the session starts with "
+    extra = env_pairs("PRECHECK_FAIL_ENV")
+    print(f"warning: the precheck `{cmd}` failed or took over {timeout:g} s; the session starts with "
           f"{' '.join(extra) if extra else 'no changes'}. Run the precheck yourself to see why.")
     return extra
 
@@ -441,9 +610,71 @@ def open_window(kind, line):
                    f"Is the Mac awake and logged in? The first run may ask to allow automation of {kind}.")
 
 
+def run_shell():
+    """argv prefix of the shell that runs a session command (REMOTE_SESSIONS_RUN_SHELL)."""
+    return split_setting("RUN_SHELL", "/bin/sh -c") or ["/bin/sh", "-c"]
+
+
 def sh_line(script):
-    """A line any interactive shell (zsh, bash, fish) runs the same way: the script goes to /bin/sh."""
-    return "/bin/sh -c " + shlex.quote(script)
+    """A line any interactive shell (zsh, bash, fish) runs the same way: the script goes to /bin/sh
+    (or REMOTE_SESSIONS_RUN_SHELL)."""
+    return " ".join(shlex.quote(a) for a in run_shell()) + " " + shlex.quote(script)
+
+
+def new_session_title(path, name, default):
+    """Title for a new session: REMOTE_SESSIONS_TITLE_CMD's first output line, else `default`."""
+    cmd = setting("TITLE_CMD")
+    if not cmd:
+        return default
+    try:
+        argv = shlex.split(cmd)
+        argv[0] = os.path.expanduser(argv[0])
+        r = subprocess.run(argv + [path, name or ""], capture_output=True, text=True, timeout=10)
+        line = (r.stdout or "").strip().splitlines()[0].strip() if r.returncode == 0 and (r.stdout or "").strip() else ""
+    except (subprocess.TimeoutExpired, OSError, ValueError, IndexError):
+        line = ""
+    return line or default
+
+
+def tmux_server_running():
+    t = tmux_bin()
+    return bool(t) and subprocess.run([t, "list-sessions"], capture_output=True).returncode == 0
+
+
+def ensure_tmux_server():
+    """With TMUX_SERVER_VIA_TERMINAL=1 on macOS: when no tmux server runs, start one from a terminal window
+    (it then has the terminal's permissions, not those of the caller, e.g. a launchd job) and wait for it.
+    The window runs in the terminal REMOTE_SESSIONS_TERMINAL names (auto: iTerm if installed, else Terminal).
+    Returns True when it started the keepalive session, which drop_keepalive() removes once the real session
+    exists. Any failure (screen locked, automation not allowed) only warns: tmux then starts from here."""
+    if not flag("TMUX_SERVER_VIA_TERMINAL") or not osascript() or tmux_server_running():
+        return False
+    try:
+        kind = pick_terminal(False)
+    except Fail as e:
+        print(f"warning: cannot start the tmux server from a terminal ({e}); starting it from here")
+        return False
+    if kind not in ("iterm", "terminal"):
+        print("warning: REMOTE_SESSIONS_TERMINAL is tmux, so there is no terminal window to start the tmux "
+              "server from; starting it from here")
+        return False
+    tmux = tmux_bin()
+    try:
+        open_window(kind, f"{shlex.quote(tmux)} new-session -d -s {KEEPALIVE}; exit")
+    except Fail as e:
+        print(f"warning: could not open a {kind} window for the tmux server ({e}); starting it from here")
+        return False
+    for _ in range(40):
+        if tmux_server_running():
+            return True
+        time.sleep(0.25)
+    print("warning: started a terminal window to bring up the tmux server, but it did not come up in 10 s")
+    return False
+
+
+def drop_keepalive():
+    """Removes the keepalive session ensure_tmux_server() started; the real session now keeps the server up."""
+    subprocess.run([tmux_bin(), "kill-session", "-t", KEEPALIVE], capture_output=True)
 
 
 def tmux_session_name(base):
@@ -453,5 +684,11 @@ def tmux_session_name(base):
 def start_tmux(session, path, script):
     """Detached tmux session running `script` with /bin/sh; the pane keeps a login shell afterwards."""
     keep_shell = 'exec "${SHELL:-/bin/sh}" -l'
-    subprocess.run([tmux_bin(), "new-session", "-d", "-s", session, "-c", path,
-                    "/bin/sh", "-c", script + "; " + keep_shell], check=True)
+    subprocess.run([tmux_bin(), "new-session", "-d", "-s", session, "-c", path] +
+                   run_shell() + [script + "; " + keep_shell], check=True)
+
+
+if __name__ == "__main__":   # the plugin's SessionStart hook: python3 lib/remote_sessions.py --seed
+    if "--seed" in sys.argv[1:]:
+        seed_config()
+    sys.exit(0)
