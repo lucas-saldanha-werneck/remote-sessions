@@ -13,10 +13,34 @@ Configuration (environment variable wins over the config file):
                            (file key: PRECHECK_FAIL_ENV)
   REMOTE_SESSIONS_KEEP_ENV names that must NOT be removed from the new session's environment
                            (file key: KEEP_ENV, space separated)
+  REMOTE_SESSIONS_DROP_ENV extra names removed from the new session's environment (file key: DROP_ENV,
+                           space separated; NAME_* removes every name with that prefix)
+  REMOTE_SESSIONS_PRECHECK_TIMEOUT
+                           seconds the precheck may take (file key: PRECHECK_TIMEOUT, default 15)
+  REMOTE_SESSIONS_PRECHECK_IN_TMUX
+                           1 = for --tmux sessions, run the precheck inside the tmux server with
+                           `tmux run-shell`, where the session itself will run (file key: PRECHECK_IN_TMUX).
+                           On macOS a launchd job may lack file permissions (TCC) that the tmux server,
+                           started from a terminal, has.
+  REMOTE_SESSIONS_TMUX_SERVER_VIA_TERMINAL
+                           1 = on macOS, when no tmux server runs, start it from a terminal window first
+                           (file key: TMUX_SERVER_VIA_TERMINAL), so it inherits the terminal's permissions
+  REMOTE_SESSIONS_RUN_SHELL
+                           shell that runs the session command (file key: RUN_SHELL, default `/bin/sh -c`).
+                           `/bin/zsh -lic` makes shell functions and aliases from ~/.zshrc apply, such as a
+                           `claude` wrapper function
+  REMOTE_SESSIONS_TEAMS_ENV
+                           KEY=VALUE pairs that --teams adds (file key: TEAMS_ENV,
+                           default CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1)
+  REMOTE_SESSIONS_TMUX_ENV KEY=VALUE pairs added to every --tmux session (file key: TMUX_ENV)
+  REMOTE_SESSIONS_TITLE_CMD
+                           command that names new sessions (file key: TITLE_CMD). It gets the folder path
+                           and the --name text (maybe empty) as two arguments; its first output line is the
+                           title. Empty output or a failure keeps the built-in "<folder> · <name>"
   CLAUDE_CONFIG_DIR        Claude Code's config folder (default ~/.claude); sessions are read from
                            its projects/ subfolder
 """
-import datetime, difflib, glob, json, os, re, shlex, shutil, subprocess, sys, unicodedata
+import datetime, difflib, glob, json, os, re, shlex, shutil, subprocess, sys, time, unicodedata
 
 SKIP = re.compile(r"^(\.|node_modules$|__pycache__$)")
 DATE_FMT = "%Y-%m-%d %H:%M"
@@ -116,13 +140,24 @@ for _s in (sys.stdout, sys.stderr):  # titles may hold any character; Windows co
 
 # ---------------------------------------------------------------- environment hygiene
 
+def drop_lists():
+    """(names, prefixes) to remove from a new session: the built-in lists plus REMOTE_SESSIONS_DROP_ENV
+    (space separated; a name ending in * is a prefix, e.g. MY_WRAPPER_*)."""
+    extra = (setting("DROP_ENV", "") or "").split()
+    names = SESSION_ENV + [n for n in extra if not n.endswith("*") and re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", n)]
+    prefixes = SESSION_ENV_PREFIXES + tuple(n[:-1] for n in extra
+                                            if n.endswith("*") and re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", n[:-1]))
+    return names, prefixes
+
+
 def scrub_env():
     """Removes the parent session's variables from this process (they would reach the new window)."""
     keep = keep_env()
+    names, prefixes = drop_lists()
     for k in list(os.environ):
         if k in keep:
             continue
-        if k in SESSION_ENV or k.startswith(SESSION_ENV_PREFIXES):
+        if k in names or k.startswith(prefixes):
             del os.environ[k]
 
 
@@ -130,8 +165,9 @@ def unset_snippet():
     """POSIX sh code that removes the same variables inside the new window. Needed because a terminal app
     that was itself started from a Claude session passes them to every new window."""
     keep = keep_env()
-    names = [n for n in SESSION_ENV if n not in keep]
-    pat = ";".join(f"s/^\\({p}[A-Za-z0-9_]*\\)=.*/\\1/p" for p in SESSION_ENV_PREFIXES)
+    all_names, prefixes = drop_lists()
+    names = [n for n in all_names if n not in keep]
+    pat = ";".join(f"s/^\\({p}[A-Za-z0-9_]*\\)=.*/\\1/p" for p in prefixes)
     out = f"unset {' '.join(names)} 2>/dev/null; " if names else ""
     keep_case = " ".join(sorted(keep))
     out += (f"for v in $(env | sed -n '{pat}'); do case \" {keep_case} \" in *\" $v \"*) ;; "
@@ -356,20 +392,39 @@ def list_projects(root, prefix):
 
 # ---------------------------------------------------------------- precheck
 
-def precheck_env():
+def env_pairs(key, default=""):
+    """KEY=VALUE pairs from a setting (shell-style quoting allowed), ready to put before a command."""
+    out = []
+    for a in shlex.split(setting(key, default) or ""):
+        if re.match(r"^[A-Za-z_][A-Za-z0-9_]*=", a):
+            k, v = a.split("=", 1)
+            out.append(f"{k}={shlex.quote(v)}")
+    return out
+
+
+def flag(key):
+    return (setting(key, "") or "").lower() in ("1", "true", "yes", "on")
+
+
+def precheck_env(in_tmux=False):
     """Runs REMOTE_SESSIONS_PRECHECK (if set). Returns extra KEY=VALUE pairs for the session when it
-    fails or times out, and prints a warning. Without a precheck, returns []."""
+    fails or times out, and prints a warning. Without a precheck, returns [].
+    in_tmux: the session will run in tmux; with PRECHECK_IN_TMUX=1 the check runs there too."""
     cmd = setting("PRECHECK")
     if not cmd:
         return []
+    timeout = float(setting("PRECHECK_TIMEOUT", "15"))
+    argv = ["/bin/sh", "-c", cmd]
+    if in_tmux and flag("PRECHECK_IN_TMUX") and tmux_bin():
+        argv = [tmux_bin(), "run-shell", cmd + " >/dev/null 2>&1"]
     try:
-        ok = subprocess.run(["/bin/sh", "-c", cmd], capture_output=True, timeout=15).returncode == 0
+        ok = subprocess.run(argv, capture_output=True, timeout=timeout).returncode == 0
     except (subprocess.TimeoutExpired, OSError):
         ok = False
     if ok:
         return []
-    extra = (setting("PRECHECK_FAIL_ENV", "") or "").split()
-    print(f"warning: the precheck `{cmd}` failed or took over 15 s; the session starts with "
+    extra = env_pairs("PRECHECK_FAIL_ENV")
+    print(f"warning: the precheck `{cmd}` failed or took over {timeout:g} s; the session starts with "
           f"{' '.join(extra) if extra else 'no changes'}. Run the precheck yourself to see why.")
     return extra
 
@@ -441,9 +496,47 @@ def open_window(kind, line):
                    f"Is the Mac awake and logged in? The first run may ask to allow automation of {kind}.")
 
 
+def run_shell():
+    """argv prefix of the shell that runs a session command (REMOTE_SESSIONS_RUN_SHELL)."""
+    return shlex.split(setting("RUN_SHELL", "/bin/sh -c") or "/bin/sh -c")
+
+
 def sh_line(script):
-    """A line any interactive shell (zsh, bash, fish) runs the same way: the script goes to /bin/sh."""
-    return "/bin/sh -c " + shlex.quote(script)
+    """A line any interactive shell (zsh, bash, fish) runs the same way: the script goes to /bin/sh
+    (or REMOTE_SESSIONS_RUN_SHELL)."""
+    return " ".join(shlex.quote(a) for a in run_shell()) + " " + shlex.quote(script)
+
+
+def new_session_title(path, name, default):
+    """Title for a new session: REMOTE_SESSIONS_TITLE_CMD's first output line, else `default`."""
+    cmd = setting("TITLE_CMD")
+    if not cmd:
+        return default
+    try:
+        argv = shlex.split(cmd)
+        argv[0] = os.path.expanduser(argv[0])
+        r = subprocess.run(argv + [path, name or ""], capture_output=True, text=True, timeout=10)
+        line = (r.stdout or "").strip().splitlines()[0].strip() if r.returncode == 0 and (r.stdout or "").strip() else ""
+    except (subprocess.TimeoutExpired, OSError, ValueError, IndexError):
+        line = ""
+    return line or default
+
+
+def ensure_tmux_server():
+    """With TMUX_SERVER_VIA_TERMINAL=1 on macOS: when no tmux server runs, start one from a terminal window
+    (it then has the terminal's permissions, not those of the caller, e.g. a launchd job) and wait for it."""
+    if not flag("TMUX_SERVER_VIA_TERMINAL") or not osascript():
+        return
+    tmux = tmux_bin()
+    if subprocess.run([tmux, "list-sessions"], capture_output=True).returncode == 0:
+        return
+    kind = "iterm" if iterm_installed() else "terminal"
+    open_window(kind, f"{shlex.quote(tmux)} new-session -d -s remote-sessions-keepalive; exit")
+    for _ in range(40):
+        if subprocess.run([tmux, "list-sessions"], capture_output=True).returncode == 0:
+            return
+        time.sleep(0.25)
+    print("warning: started a terminal window to bring up the tmux server, but it did not come up in 10 s")
 
 
 def tmux_session_name(base):
@@ -453,5 +546,5 @@ def tmux_session_name(base):
 def start_tmux(session, path, script):
     """Detached tmux session running `script` with /bin/sh; the pane keeps a login shell afterwards."""
     keep_shell = 'exec "${SHELL:-/bin/sh}" -l'
-    subprocess.run([tmux_bin(), "new-session", "-d", "-s", session, "-c", path,
-                    "/bin/sh", "-c", script + "; " + keep_shell], check=True)
+    subprocess.run([tmux_bin(), "new-session", "-d", "-s", session, "-c", path] +
+                   run_shell() + [script + "; " + keep_shell], check=True)

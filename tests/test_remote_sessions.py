@@ -253,6 +253,110 @@ class TestOpen(Base):
         self.assertIn("unknown terminal 'kitty'", r.stderr)
 
 
+class TestOptions(Base):
+    """The settings that let a personal setup live outside the plugin: --teams/TEAMS_ENV, TMUX_ENV,
+    RUN_SHELL, PRECHECK_IN_TMUX, TMUX_SERVER_VIA_TERMINAL, TITLE_CMD, DROP_ENV."""
+
+    def setUp(self):
+        super().setUp()
+        self.session("alpha", "a1111111-0000-0000-0000-000000000001", first="fix the parser", age=100)
+
+    def test_teams_default_and_custom_env(self):
+        r = self.run_cmd("claude-open", "alpha", "--teams", "--tmux", "--dry-run")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1 ", r.stdout)
+        r = self.run_cmd("claude-open", "alpha", "--resume", "last", "--teams", "--dry-run",
+                         env={"REMOTE_SESSIONS_TEAMS_ENV": "TEAMS_A=1 'TEAMS_B=x y'"})
+        self.assertIn("TEAMS_A=1 TEAMS_B='x y' ", r.stdout)
+        self.assertIn("--resume a1111111", r.stdout)
+        r = self.run_cmd("claude-open", "alpha", "--tmux", "--dry-run")
+        self.assertNotIn("AGENT_TEAMS", r.stdout)
+
+    def test_tmux_env_only_for_tmux(self):
+        e = {"REMOTE_SESSIONS_TMUX_ENV": "UNATTENDED=1"}
+        r = self.run_cmd("claude-open", "alpha", "--tmux", "--dry-run", env=e)
+        self.assertIn("UNATTENDED=1 ", r.stdout)
+        r = self.run_cmd("claude-open", "alpha", "--dry-run", env=dict(e, REMOTE_SESSIONS_TERMINAL="iterm"))
+        self.assertNotIn("UNATTENDED", r.stdout)
+
+    @POSIX_ONLY
+    def test_run_shell_for_tmux_and_window(self):
+        e = {"REMOTE_SESSIONS_RUN_SHELL": "/bin/bash -lc"}
+        r = self.run_cmd("claude-open", "alpha", "--tmux", env=e)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        c = self.calls().split("\n")
+        i = c.index("new-session")
+        self.assertEqual(c[i + 6:i + 8], ["/bin/bash", "-lc"])
+        r = self.run_cmd("claude-open", "alpha", env=dict(e, REMOTE_SESSIONS_TERMINAL="iterm"))
+        self.assertIn('write text "/bin/bash -lc ', self.calls())
+
+    @POSIX_ONLY
+    def test_precheck_in_tmux(self):
+        marker = os.path.join(self.tmp, "precheck-ran")
+        write(os.path.join(self.fakebin, "tmux"), FAKE_RECORDER.replace(
+            "exit 0", '[ "$1" = run-shell ] && exit 3\nexit 0'), 0o755)
+        e = {"REMOTE_SESSIONS_PRECHECK": f"touch '{marker}'", "REMOTE_SESSIONS_PRECHECK_FAIL_ENV": "NO_SECRETS=1",
+             "REMOTE_SESSIONS_PRECHECK_IN_TMUX": "1"}
+        r = self.run_cmd("claude-open", "alpha", "--tmux", env=e)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        c = self.calls().split("\n")
+        self.assertIn("run-shell", c)
+        self.assertEqual(c[c.index("run-shell") + 1], f"touch '{marker}' >/dev/null 2>&1")
+        self.assertFalse(os.path.exists(marker))                 # ran in the (fake) tmux server, not here
+        self.assertIn("NO_SECRETS=1 ", c[c.index("new-session") + 8])
+        r = self.run_cmd("claude-open", "alpha", "--tmux", env=dict(e, REMOTE_SESSIONS_PRECHECK_IN_TMUX="0"))
+        self.assertTrue(os.path.exists(marker))                  # off: runs with /bin/sh in this process
+
+    @POSIX_ONLY
+    def test_tmux_server_via_terminal(self):
+        up = os.path.join(self.tmp, "server-up")
+        write(os.path.join(self.fakebin, "tmux"), FAKE_RECORDER.replace(
+            "exit 0", f'[ "$1" = list-sessions ] && [ ! -e "{up}" ] && exit 1\nexit 0'), 0o755)
+        write(os.path.join(self.fakebin, "osascript"), FAKE_RECORDER.replace("exit 0", f'touch "{up}"\nexit 0'), 0o755)
+        e = {"REMOTE_SESSIONS_TMUX_SERVER_VIA_TERMINAL": "1"}
+        r = self.run_cmd("claude-open", "alpha", "--tmux", env=e)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        c = self.calls()
+        self.assertIn("new-session -d -s remote-sessions-keepalive; exit", c)
+        self.assertLess(c.index("== osascript"), c.index("\nnew-session\n"))
+        os.remove(self.log)
+        r = self.run_cmd("claude-open", "alpha", "--tmux", env=e)   # server up now: no window
+        self.assertNotIn("osascript", self.calls())
+        os.remove(up)
+        os.remove(self.log)
+        r = self.run_cmd("claude-open", "alpha", "--tmux")          # option off: no window either
+        self.assertNotIn("osascript", self.calls())
+
+    def test_title_command(self):
+        script = os.path.join(self.tmp, "title.py").replace("\\", "/")
+        write(script, "import os, sys\nprint('T:' + os.path.basename(sys.argv[1]) + ':' + sys.argv[2])\n")
+        e = {"REMOTE_SESSIONS_TITLE_CMD": f'"{PY}" "{script}"'}
+        r = self.run_cmd("claude-open", "alpha", "--name", "parser", "--tmux", "--dry-run", env=e)
+        self.assertIn("--remote-control T:alpha:parser -n T:alpha:parser", r.stdout)
+        r = self.run_cmd("claude-open", "alpha", "--tmux", "--dry-run", env=e)
+        self.assertIn("--remote-control T:alpha:", r.stdout)
+        r = self.run_cmd("claude-open", "alpha", "--name", "parser", "--tmux", "--dry-run",
+                         env={"REMOTE_SESSIONS_TITLE_CMD": f'"{PY}" -c "import sys; sys.exit(1)"'})
+        self.assertIn("--remote-control 'alpha · parser'", r.stdout)   # failure: built-in title
+
+    def test_drop_env(self):
+        old = dict(os.environ)
+        try:
+            os.environ.update({"REMOTE_SESSIONS_DROP_ENV": "WRAP_ACTIVE MYTOOL_* bad-name",
+                               "WRAP_ACTIVE": "1", "MYTOOL_X": "1", "OTHER": "1"})
+            snippet = rs.unset_snippet()
+            self.assertIn(" WRAP_ACTIVE ", snippet + " ")
+            self.assertIn("MYTOOL_", snippet)
+            self.assertNotIn("bad-name", snippet)
+            rs.scrub_env()
+            self.assertNotIn("WRAP_ACTIVE", os.environ)
+            self.assertNotIn("MYTOOL_X", os.environ)
+            self.assertIn("OTHER", os.environ)
+        finally:
+            os.environ.clear()
+            os.environ.update(old)
+
+
 class TestLib(unittest.TestCase):
     def test_applescript_escaping(self):
         self.assertEqual(rs.applescript_string('a "b" \\c'), '"a \\"b\\" \\\\c"')

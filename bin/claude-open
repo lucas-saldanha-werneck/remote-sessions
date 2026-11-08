@@ -2,8 +2,8 @@
 """claude-open: open or resume a Claude Code session in another project folder, in a new terminal window
 (or a detached tmux session), with Remote Control on, so it shows up in the Claude app on your phone.
 
-  claude-open <approx-name> [--create] [--name <title>] [--prompt <text>] [--tmux] [--dry-run]
-  claude-open <approx-name> --resume <id|last> [--force] [--tmux] [--dry-run]
+  claude-open <approx-name> [--create] [--name <title>] [--prompt <text>] [--tmux] [--teams] [--dry-run]
+  claude-open <approx-name> --resume <id|last> [--force] [--tmux] [--teams] [--dry-run]
   claude-open <approx-name> --list [N]
   claude-open <parent> --new <subfolder> [--dry-run]
   claude-open --projects [folder]
@@ -21,8 +21,11 @@ client/inventory-app. "." means the root itself.
   --tmux          start in a detached tmux session instead of a terminal window (does not steal focus)
   --name <title>  session title in the app and in /resume
   --prompt <txt>  first message of the session
+  --teams         turn on agent teams for this session only (REMOTE_SESSIONS_TEAMS_ENV, default
+                  CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1); works with --tmux, windows and --resume
 
-Configuration: see `lib/remote_sessions.py` or the README (projects root, terminal, claude command).
+Configuration: see `lib/remote_sessions.py` or the README (projects root, terminal, claude command,
+precheck, run shell, title command, extra environment).
 """
 import os, shlex, sys, time
 
@@ -30,7 +33,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.realpath
 import remote_sessions as rs  # noqa: E402
 
 VALUE_OPTS = ("--resume", "--list", "--projects", "--new", "--name", "--prompt")
-FLAGS = ("--create", "--dry-run", "--force", "--tmux")
+FLAGS = ("--create", "--dry-run", "--force", "--tmux", "--teams")
 
 
 def parse(argv):
@@ -111,27 +114,33 @@ def main():
         tname = f"claude-{label}-{sid[:8]}"
     else:
         title = f"{label} · {opts['--name']}" if opts.get("--name") else label
+        title = rs.new_session_title(path, opts.get("--name") or "", title)
         claude_args = ["--remote-control", title] + (["-n", title] if opts.get("--name") else [])
         tname = f"claude-{opts.get('--name') or label}-{int(time.time())}"
     if opts.get("--prompt"):
         claude_args.append(opts["--prompt"])
 
-    env = [] if dry else rs.precheck_env()
+    try:
+        kind = rs.pick_terminal("--tmux" in flags)
+    except rs.Fail as e:
+        if not dry:
+            raise
+        kind = f"none ({e})"
+    env = rs.env_pairs("TEAMS_ENV", "CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1") if "--teams" in flags else []
+    env += rs.env_pairs("TMUX_ENV") if kind == "tmux" else []
+    if not dry:
+        if kind == "tmux":
+            rs.ensure_tmux_server()  # before the precheck, which may run inside the tmux server
+        env += rs.precheck_env(in_tmux=kind == "tmux")
 
     def build():
         return (rs.unset_snippet() + f"cd {shlex.quote(path)} && " +
                 " ".join(env + [rs.claude_cmd()] + [shlex.quote(a) for a in claude_args]))
 
     script = build()
-    kind = "tmux" if "--tmux" in flags else None
     if dry:
-        try:
-            kind = rs.pick_terminal("--tmux" in flags)
-        except rs.Fail as e:
-            kind = f"none ({e})"
         print(f"folder: {target}\nterminal: {kind}\ncommand: {script}")
         return
-    kind = rs.pick_terminal("--tmux" in flags)
     print(f"folder: {target}\ncommand: {script}")
     if kind == "tmux":
         session = rs.tmux_session_name(tname)

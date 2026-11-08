@@ -1,6 +1,6 @@
 {
   "name": "remote-sessions",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Open, resume and fork Claude Code sessions on your computer from the phone: a new terminal window per session, Remote Control on, picked from numbered project, folder and session lists.",
   "author": {
     "name": "Lucas Saldanha Werneck",
