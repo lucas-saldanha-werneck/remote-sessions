@@ -58,6 +58,10 @@ SESSION_ENV = [
 SESSION_ENV_PREFIXES = ("CLAUDE_AGENT_SDK_", "CLAUDE_PREVIEW_")
 
 
+OWN = "REMOTE_SESSIONS_"          # our own settings: never removed by DROP_ENV
+KEEPALIVE = "remote-sessions-keepalive"
+
+
 class Fail(Exception):
     """A user-facing error: printed as one line, exit code 1."""
 
@@ -70,6 +74,28 @@ def _config_file():
         "remote-sessions", "config")
 
 
+def _strip_comment(v):
+    """Drops a trailing ` # comment` (a # after whitespace, outside quotes)."""
+    quote = None
+    for i, c in enumerate(v):
+        if quote:
+            if c == quote:
+                quote = None
+        elif c in "\"'":
+            quote = c
+        elif c == "#" and (i == 0 or v[i - 1].isspace()):
+            return v[:i].rstrip()
+    return v
+
+
+def _unquote(v):
+    """Removes the surrounding quotes only when the whole value is ONE quoted token: `'a b'` -> `a b`, but
+    `'A=x y' 'B=z'` stays as written (it is two tokens for the setting that splits it)."""
+    if len(v) >= 2 and v[0] == v[-1] and v[0] in "\"'" and v[0] not in v[1:-1]:
+        return v[1:-1]
+    return v
+
+
 def _read_config():
     out = {}
     try:
@@ -79,20 +105,52 @@ def _read_config():
                 if not line or line.startswith("#") or "=" not in line:
                     continue
                 k, v = line.split("=", 1)
-                v = v.strip()
-                if len(v) >= 2 and v[0] == v[-1] and v[0] in "\"'":
-                    v = v[1:-1]
-                out[k.strip()] = v
+                out[k.strip()] = _unquote(_strip_comment(v.strip()))
     except OSError:
         pass
     return out
 
 
+_CONFIG = None
+
+
+def _config():
+    """The config file, read once per process."""
+    global _CONFIG
+    if _CONFIG is None:
+        _CONFIG = _read_config()
+    return _CONFIG
+
+
 def setting(key, default=None):
     v = os.environ.get("REMOTE_SESSIONS_" + key)
     if v is None:
-        v = _read_config().get(key)
+        v = _config().get(key)
     return default if v in (None, "") else v
+
+
+def number(key, default):
+    """A numeric setting; anything that is not a positive number falls back to `default` with a warning."""
+    raw = setting(key)
+    if raw is None:
+        return default
+    try:
+        v = float(raw)
+        if v > 0:
+            return v
+    except ValueError:
+        pass
+    print(f"warning: REMOTE_SESSIONS_{key}={raw!r} is not a positive number; using {default:g}", file=sys.stderr)
+    return default
+
+
+def split_setting(key, default=""):
+    """A setting split like a shell line. Unbalanced quotes are a clear error, not a traceback."""
+    raw = setting(key, default) or ""
+    try:
+        return shlex.split(raw)
+    except ValueError as e:
+        raise Fail(f"REMOTE_SESSIONS_{key} ({raw!r}) cannot be split like a shell line: {e}")
 
 
 def expand(p):
@@ -143,7 +201,15 @@ for _s in (sys.stdout, sys.stderr):  # titles may hold any character; Windows co
 def drop_lists():
     """(names, prefixes) to remove from a new session: the built-in lists plus REMOTE_SESSIONS_DROP_ENV
     (space separated; a name ending in * is a prefix, e.g. MY_WRAPPER_*)."""
-    extra = (setting("DROP_ENV", "") or "").split()
+    extra = []
+    for n in (setting("DROP_ENV", "") or "").split():
+        base = n[:-1] if n.endswith("*") else n
+        # a name or prefix that would cover REMOTE_SESSIONS_* would delete our settings before they are read
+        if base.startswith(OWN) or (n.endswith("*") and OWN.startswith(base)):
+            print(f"warning: REMOTE_SESSIONS_DROP_ENV entry {n!r} is ignored: it would remove REMOTE_SESSIONS_ "
+                  f"settings", file=sys.stderr)
+            continue
+        extra.append(n)
     names = SESSION_ENV + [n for n in extra if not n.endswith("*") and re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", n)]
     prefixes = SESSION_ENV_PREFIXES + tuple(n[:-1] for n in extra
                                             if n.endswith("*") and re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", n[:-1]))
@@ -155,7 +221,7 @@ def scrub_env():
     keep = keep_env()
     names, prefixes = drop_lists()
     for k in list(os.environ):
-        if k in keep:
+        if k in keep or k.startswith(OWN):
             continue
         if k in names or k.startswith(prefixes):
             del os.environ[k]
@@ -394,11 +460,15 @@ def list_projects(root, prefix):
 
 def env_pairs(key, default=""):
     """KEY=VALUE pairs from a setting (shell-style quoting allowed), ready to put before a command."""
-    out = []
-    for a in shlex.split(setting(key, default) or ""):
+    out, dropped = [], []
+    for a in split_setting(key, default):
         if re.match(r"^[A-Za-z_][A-Za-z0-9_]*=", a):
             k, v = a.split("=", 1)
             out.append(f"{k}={shlex.quote(v)}")
+        else:
+            dropped.append(a)
+    if dropped:
+        print(f"warning: REMOTE_SESSIONS_{key}: ignored {dropped} (not KEY=VALUE)", file=sys.stderr)
     return out
 
 
@@ -413,10 +483,15 @@ def precheck_env(in_tmux=False):
     cmd = setting("PRECHECK")
     if not cmd:
         return []
-    timeout = float(setting("PRECHECK_TIMEOUT", "15"))
+    timeout = number("PRECHECK_TIMEOUT", 15.0)
     argv = ["/bin/sh", "-c", cmd]
     if in_tmux and flag("PRECHECK_IN_TMUX") and tmux_bin():
-        argv = [tmux_bin(), "run-shell", cmd + " >/dev/null 2>&1"]
+        if tmux_server_running():
+            # run-shell expands #{...} formats, so '#' is doubled; sh -c keeps a compound command whole
+            inner = "sh -c " + shlex.quote(cmd) + " >/dev/null 2>&1"
+            argv = [tmux_bin(), "run-shell", inner.replace("#", "##")]
+        else:
+            print("note: no tmux server is running, so the precheck runs here instead of inside tmux")
     try:
         ok = subprocess.run(argv, capture_output=True, timeout=timeout).returncode == 0
     except (subprocess.TimeoutExpired, OSError):
@@ -498,7 +573,7 @@ def open_window(kind, line):
 
 def run_shell():
     """argv prefix of the shell that runs a session command (REMOTE_SESSIONS_RUN_SHELL)."""
-    return shlex.split(setting("RUN_SHELL", "/bin/sh -c") or "/bin/sh -c")
+    return split_setting("RUN_SHELL", "/bin/sh -c") or ["/bin/sh", "-c"]
 
 
 def sh_line(script):
@@ -522,21 +597,45 @@ def new_session_title(path, name, default):
     return line or default
 
 
+def tmux_server_running():
+    t = tmux_bin()
+    return bool(t) and subprocess.run([t, "list-sessions"], capture_output=True).returncode == 0
+
+
 def ensure_tmux_server():
     """With TMUX_SERVER_VIA_TERMINAL=1 on macOS: when no tmux server runs, start one from a terminal window
-    (it then has the terminal's permissions, not those of the caller, e.g. a launchd job) and wait for it."""
-    if not flag("TMUX_SERVER_VIA_TERMINAL") or not osascript():
-        return
+    (it then has the terminal's permissions, not those of the caller, e.g. a launchd job) and wait for it.
+    The window runs in the terminal REMOTE_SESSIONS_TERMINAL names (auto: iTerm if installed, else Terminal).
+    Returns True when it started the keepalive session, which drop_keepalive() removes once the real session
+    exists. Any failure (screen locked, automation not allowed) only warns: tmux then starts from here."""
+    if not flag("TMUX_SERVER_VIA_TERMINAL") or not osascript() or tmux_server_running():
+        return False
+    try:
+        kind = pick_terminal(False)
+    except Fail as e:
+        print(f"warning: cannot start the tmux server from a terminal ({e}); starting it from here")
+        return False
+    if kind not in ("iterm", "terminal"):
+        print("warning: REMOTE_SESSIONS_TERMINAL is tmux, so there is no terminal window to start the tmux "
+              "server from; starting it from here")
+        return False
     tmux = tmux_bin()
-    if subprocess.run([tmux, "list-sessions"], capture_output=True).returncode == 0:
-        return
-    kind = "iterm" if iterm_installed() else "terminal"
-    open_window(kind, f"{shlex.quote(tmux)} new-session -d -s remote-sessions-keepalive; exit")
+    try:
+        open_window(kind, f"{shlex.quote(tmux)} new-session -d -s {KEEPALIVE}; exit")
+    except Fail as e:
+        print(f"warning: could not open a {kind} window for the tmux server ({e}); starting it from here")
+        return False
     for _ in range(40):
-        if subprocess.run([tmux, "list-sessions"], capture_output=True).returncode == 0:
-            return
+        if tmux_server_running():
+            return True
         time.sleep(0.25)
     print("warning: started a terminal window to bring up the tmux server, but it did not come up in 10 s")
+    return False
+
+
+def drop_keepalive():
+    """Removes the keepalive session ensure_tmux_server() started; the real session now keeps the server up."""
+    subprocess.run([tmux_bin(), "kill-session", "-t", KEEPALIVE], capture_output=True)
 
 
 def tmux_session_name(base):

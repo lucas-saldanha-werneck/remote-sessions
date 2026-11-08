@@ -100,7 +100,11 @@ TMUX_ENV=CLAUDE_CODE_DISABLE_NOTIFICATION_PRESENCE_CHECK=1
 TITLE_CMD=~/bin/my-session-title
 ```
 
-Command settings are split like a shell line (quotes work). The precheck runs with `/bin/sh -c`, so it may use pipes.
+Command settings are split like a shell line (quotes work); unbalanced quotes stop `claude-open` with a message naming the setting, and words that are not `KEY=VALUE` in an `_ENV` setting are ignored with a warning. The precheck runs with `/bin/sh -c`, so it may use pipes.
+
+How the file is read: `KEY=value` lines, `#` starts a comment (also after a value, when preceded by a space and outside quotes). Quotes around the value are removed only when the whole value is one quoted word, so `TEAMS_ENV='A=x y' 'B=z'` keeps both pairs. The file is read once per run. `DROP_ENV` never removes `REMOTE_SESSIONS_*` variables; an entry that would is ignored with a warning.
+
+Details of the tmux options: with `PRECHECK_IN_TMUX=1` and no tmux server running yet, the precheck runs in this process instead (a server is started first when `TMUX_SERVER_VIA_TERMINAL=1`). `TMUX_SERVER_VIA_TERMINAL` opens its window in the terminal `REMOTE_SESSIONS_TERMINAL` names; if that window cannot be opened (screen locked, automation not allowed) tmux starts from this process with a warning, and the short-lived `remote-sessions-keepalive` session is closed as soon as the real session exists. `TITLE_CMD` is not run by `--dry-run`, which shows the built-in title.
 
 The new session's environment is cleaned of the variables a running Claude session sets for its children (`CLAUDECODE`, `CLAUDE_CODE_SESSION_ID`, `CLAUDE_CODE_ENTRYPOINT` and similar). Without that, a session started from inside another one, or from a terminal app that was itself started by the desktop app, may not save its transcript. Your own settings such as `CLAUDE_CODE_USE_BEDROCK` are left alone.
 

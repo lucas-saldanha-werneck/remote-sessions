@@ -55,10 +55,10 @@ def main():
     if not os.path.isdir(folder):
         raise rs.Fail(f"folder not found: {folder}")
 
-    env = []
+    env, started_keepalive = [], False
     if not opts.get("--dry-run"):
         if rs.tmux_bin():
-            rs.ensure_tmux_server()
+            started_keepalive = rs.ensure_tmux_server()
         env = rs.precheck_env(in_tmux=bool(rs.tmux_bin()))
     claude = " ".join(env + [rs.claude_cmd(), "--resume", shlex.quote(sid), "--fork-session",
                              "--remote-control", shlex.quote(name), "-n", shlex.quote(name)])
@@ -83,6 +83,8 @@ def main():
 
     if tmux:
         rs.start_tmux(session, folder, script)
+        if started_keepalive:
+            rs.drop_keepalive()
         print(f"tmux: {session}")
         if window:
             rs.open_window(window, f"{shlex.quote(tmux)} attach -t {session}")

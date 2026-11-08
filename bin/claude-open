@@ -114,7 +114,8 @@ def main():
         tname = f"claude-{label}-{sid[:8]}"
     else:
         title = f"{label} · {opts['--name']}" if opts.get("--name") else label
-        title = rs.new_session_title(path, opts.get("--name") or "", title)
+        if not dry:  # the title command is the user's program: a dry run does not run it
+            title = rs.new_session_title(path, opts.get("--name") or "", title)
         claude_args = ["--remote-control", title] + (["-n", title] if opts.get("--name") else [])
         tname = f"claude-{opts.get('--name') or label}-{int(time.time())}"
     if opts.get("--prompt"):
@@ -126,12 +127,14 @@ def main():
         if not dry:
             raise
         kind = f"none ({e})"
+    rs.run_shell()  # a broken RUN_SHELL is reported now, also in a dry run
     in_tmux = kind == "tmux" or "--tmux" in flags  # a dry run without tmux installed still shows the env
     env = rs.env_pairs("TEAMS_ENV", "CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1") if "--teams" in flags else []
     env += rs.env_pairs("TMUX_ENV") if in_tmux else []
+    started_keepalive = False
     if not dry:
         if in_tmux:
-            rs.ensure_tmux_server()  # before the precheck, which may run inside the tmux server
+            started_keepalive = rs.ensure_tmux_server()  # before the precheck, which may run inside tmux
         env += rs.precheck_env(in_tmux=in_tmux)
 
     def build():
@@ -146,6 +149,8 @@ def main():
     if kind == "tmux":
         session = rs.tmux_session_name(tname)
         rs.start_tmux(session, path, script)
+        if started_keepalive:
+            rs.drop_keepalive()
         print(f"tmux: {session} (no window; attach with: tmux attach -t {session})")
         return
     rs.open_window(kind, rs.sh_line(script))
