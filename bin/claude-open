@@ -1,0 +1,149 @@
+#!/usr/bin/env python3
+"""claude-open: open or resume a Claude Code session in another project folder, in a new terminal window
+(or a detached tmux session), with Remote Control on, so it shows up in the Claude app on your phone.
+
+  claude-open <approx-name> [--create] [--name <title>] [--prompt <text>] [--tmux] [--dry-run]
+  claude-open <approx-name> --resume <id|last> [--force] [--tmux] [--dry-run]
+  claude-open <approx-name> --list [N]
+  claude-open <parent> --new <subfolder> [--dry-run]
+  claude-open --projects [folder]
+
+<approx-name> is matched against folders under the projects root: "clinet/invntory" finds
+client/inventory-app. "." means the root itself.
+
+  --create        create the folder when nothing close exists (uses the name as typed)
+  --dry-run       print the folder and the command; open nothing
+  --resume <id>   resume a past session of the folder (full id, an 8-char prefix, or "last")
+  --force         with --resume: open even if that session is already running somewhere
+  --new <name>    create <parent>/<name> (exact name; refuses if it exists) and open a new session there
+  --list [N]      JSON: the N most recent sessions of the folder (default 8)
+  --projects [f]  JSON: one level of the folder tree, only folders that have sessions in or below them
+  --tmux          start in a detached tmux session instead of a terminal window (does not steal focus)
+  --name <title>  session title in the app and in /resume
+  --prompt <txt>  first message of the session
+
+Configuration: see `lib/remote_sessions.py` or the README (projects root, terminal, claude command).
+"""
+import os, shlex, sys, time
+
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.realpath(__file__))), "lib"))
+import remote_sessions as rs  # noqa: E402
+
+VALUE_OPTS = ("--resume", "--list", "--projects", "--new", "--name", "--prompt")
+FLAGS = ("--create", "--dry-run", "--force", "--tmux")
+
+
+def parse(argv):
+    opts, rest = {}, []
+    i = 0
+    while i < len(argv):
+        a = argv[i]
+        if a in VALUE_OPTS:
+            nxt = argv[i + 1] if i + 1 < len(argv) and not argv[i + 1].startswith("--") else None
+            opts[a] = nxt
+            i += 2 if nxt is not None else 1
+            continue
+        if a in ("-h", "--help"):
+            print(__doc__)
+            sys.exit(0)
+        if a.startswith("--") and a not in FLAGS:
+            raise rs.Fail(f"unknown option {a}. See claude-open --help.")
+        rest.append(a)
+        i += 1
+    flags = {a for a in rest if a.startswith("--")}
+    args = [a for a in rest if not a.startswith("--")]
+    return opts, flags, args
+
+
+def main():
+    rs.scrub_env()
+    opts, flags, args = parse(sys.argv[1:])
+    root = rs.projects_root()
+    dry = "--dry-run" in flags
+
+    if "--projects" in opts:
+        rs.print_json(rs.list_projects(root, opts["--projects"]))
+        return
+    if len(args) != 1:
+        print(__doc__, file=sys.stderr)
+        sys.exit(2)
+    target = rs.resolve(root, args[0], create="--create" in flags, dry_run=dry)
+    path = root if target == "." else os.path.join(root, target)
+
+    if "--new" in opts:
+        sub = (opts["--new"] or "").strip()
+        if not sub or "/" in sub or "\\" in sub or "'" in sub or '"' in sub or sub.startswith("."):
+            raise rs.Fail("--new needs a folder name (no '/', no quotes, not starting with '.').")
+        path = os.path.join(path, sub)
+        target = os.path.relpath(path, root).replace(os.sep, "/")
+        if os.path.exists(path):
+            raise rs.Fail(f"'{target}' already exists. Open it with: claude-open '{target}'")
+        if dry:
+            print(f"would create: {target}")
+        else:
+            os.makedirs(path)
+            print(f"created: {target}")
+
+    if "--list" in opts:
+        n = int(opts["--list"] or 8)
+        rs.print_json({"folder": target, "sessions": rs.list_sessions(path, n)})
+        return
+
+    label = os.path.basename(root) if target == "." else target
+    if "--resume" in opts:
+        want = opts["--resume"]
+        if not want:
+            raise rs.Fail("--resume needs a session id (or 'last').")
+        if want.lower() in ("last", "latest"):  # newest real conversation: no empty sessions, no `claude -p` runs
+            match = [s["id"] for s in rs.list_sessions(path, 1)]
+        else:
+            ids = [os.path.basename(f)[:-6] for f in rs.session_files(path)]
+            match = [i for i in ids if i.startswith(want)]
+        if len(match) != 1:
+            raise rs.Fail(f"session '{want}' {'not found' if not match else 'is ambiguous'} in {target}. "
+                          f"See: claude-open '{target}' --list")
+        sid = match[0]
+        if sid in rs.open_ids() and "--force" not in flags:
+            raise rs.Fail(f"session {sid[:8]} is already running in another terminal; Remote Control does "
+                          f"not attach to a second copy. Use --force to open it anyway.")
+        # no name here: the resumed session keeps its title
+        claude_args = ["--resume", sid, "--remote-control"]
+        tname = f"claude-{label}-{sid[:8]}"
+    else:
+        title = f"{label} · {opts['--name']}" if opts.get("--name") else label
+        claude_args = ["--remote-control", title] + (["-n", title] if opts.get("--name") else [])
+        tname = f"claude-{opts.get('--name') or label}-{int(time.time())}"
+    if opts.get("--prompt"):
+        claude_args.append(opts["--prompt"])
+
+    env = [] if dry else rs.precheck_env()
+
+    def build():
+        return (rs.unset_snippet() + f"cd {shlex.quote(path)} && " +
+                " ".join(env + [rs.claude_cmd()] + [shlex.quote(a) for a in claude_args]))
+
+    script = build()
+    kind = "tmux" if "--tmux" in flags else None
+    if dry:
+        try:
+            kind = rs.pick_terminal("--tmux" in flags)
+        except rs.Fail as e:
+            kind = f"none ({e})"
+        print(f"folder: {target}\nterminal: {kind}\ncommand: {script}")
+        return
+    kind = rs.pick_terminal("--tmux" in flags)
+    print(f"folder: {target}\ncommand: {script}")
+    if kind == "tmux":
+        session = rs.tmux_session_name(tname)
+        rs.start_tmux(session, path, script)
+        print(f"tmux: {session} (no window; attach with: tmux attach -t {session})")
+        return
+    rs.open_window(kind, rs.sh_line(script))
+    print(f"window opened ({kind})")
+
+
+if __name__ == "__main__":
+    try:
+        main()
+    except rs.Fail as e:
+        sys.exit(f"claude-open: {e}")

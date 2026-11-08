@@ -1,0 +1,248 @@
+#!/usr/bin/env python3
+"""claude-desk: reopen a session of the Claude desktop app (Code tab) and turn Remote Control on.
+macOS only.
+
+  claude-desk --list [N]               JSON: N recent (not archived) desktop sessions: id, when, title, folder, rc
+  claude-desk <id|text>                open the session and turn Remote Control on
+  claude-desk <id|text> --no-rc        only open it
+  claude-desk new <folder> [--msg "text"] [--no-rc]
+                                       create the folder if missing, start a NEW desktop session in it and
+                                       turn Remote Control on. <folder>: absolute, ~/..., or relative to the
+                                       projects root
+
+How it works (undocumented app internals; may change with app updates):
+  1. `open claude://code/continue?session=local_<uuid>` focuses the session and starts its process.
+  2. The `ax-press` helper presses the "Remote Control" switch of the session panel through the macOS
+     Accessibility API (the terminal or Python running this needs Accessibility permission).
+  3. The app log (~/Library/Logs/Claude/main.log) is read to confirm "Remote control enabled".
+`new`: `claude -p --session-id <uuid>` creates the session in the folder; the deep link
+`claude://resume?session=<uuid>` imports it into the app as local_<uuid>.
+Without ax-press (no Swift compiler), the session still opens; turn Remote Control on in its panel.
+The app must be open and the Mac unlocked.
+
+Settings: REMOTE_SESSIONS_AX_PRESS (helper path), REMOTE_SESSIONS_DESKTOP_SESSIONS (app session folder),
+REMOTE_SESSIONS_DESKTOP_LOG (app log), plus the common ones (projects root, claude command).
+"""
+import glob, json, os, shlex, shutil, subprocess, sys, time, uuid
+
+REPO = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
+sys.path.insert(0, os.path.join(REPO, "lib"))
+import remote_sessions as rs  # noqa: E402
+
+BASE = rs.expand(rs.setting("DESKTOP_SESSIONS", "~/Library/Application Support/Claude/claude-code-sessions"))
+LOG = rs.expand(rs.setting("DESKTOP_LOG", "~/Library/Logs/Claude/main.log"))
+DATA = rs.expand(os.environ.get("XDG_DATA_HOME") or "~/.local/share")
+
+
+def ax_press():
+    """Path of the ax-press helper, building it from tools/ax-press.swift on first use. None if unavailable."""
+    p = rs.setting("AX_PRESS")
+    if p:
+        p = rs.expand(p)
+        return p if os.access(p, os.X_OK) else None
+    built = os.path.join(DATA, "remote-sessions", "ax-press")
+    if os.access(built, os.X_OK):
+        return built
+    swiftc = shutil.which("swiftc")
+    src = os.path.join(REPO, "tools", "ax-press.swift")
+    if not (rs.is_mac() and swiftc and os.path.exists(src)):
+        return None
+    os.makedirs(os.path.dirname(built), exist_ok=True)
+    print("building ax-press (once)...")
+    r = subprocess.run([swiftc, "-O", "-o", built, src], capture_output=True, text=True)
+    if r.returncode != 0:
+        print(f"could not build ax-press: {(r.stderr or r.stdout)[-300:]}")
+        return None
+    return built
+
+
+def sessions():
+    out = []
+    for f in glob.glob(os.path.join(BASE, "*", "*", "local_*.json")):
+        try:
+            with open(f, encoding="utf-8") as fh:
+                d = json.load(fh)
+        except Exception:
+            continue
+        if d.get("isArchived") or not d.get("sessionId"):
+            continue
+        out.append(d)
+    out.sort(key=lambda d: d.get("lastActivityAt") or 0, reverse=True)
+    return out
+
+
+def short(d):
+    return {
+        "id": d["sessionId"],
+        "when": time.strftime(rs.DATE_FMT, time.localtime((d.get("lastActivityAt") or 0) / 1000)),
+        "title": d.get("title", ""),
+        "folder": (d.get("cwd") or "").replace(os.path.expanduser("~"), "~", 1),
+        "rc": bool(d.get("remoteControlUserEnabled")),
+    }
+
+
+def resolve(q):
+    ss = sessions()
+    if not q.startswith("local_") and len(q) == 36:
+        q = "local_" + q
+    for d in ss:
+        if d["sessionId"] == q:
+            return d
+    ql = q.lower()
+    hits = [d for d in ss if ql in (d.get("title", "") + " " + (d.get("cwd") or "")).lower()]
+    if len(hits) == 1:
+        return hits[0]
+    if not hits:
+        raise rs.Fail(f"no desktop session matches: {q}")
+    rs.print_json([short(d) for d in hits[:10]])
+    raise rs.Fail(f"{len(hits)} sessions match; use the id")
+
+
+def log_size():
+    try:
+        return os.path.getsize(LOG)
+    except OSError:
+        return 0
+
+
+def log_since(pos):
+    try:
+        with open(LOG, "rb") as fh:
+            fh.seek(pos)
+            return fh.read().decode("utf-8", "replace")
+    except OSError:
+        return ""
+
+
+def wait_log(pos, needle, timeout):
+    end = time.time() + timeout
+    while time.time() < end:
+        if needle in log_since(pos):
+            return True
+        time.sleep(0.5)
+    return False
+
+
+def app_pid():
+    r = subprocess.run(["ps", "-axo", "pid=,command="], capture_output=True, text=True)
+    for line in r.stdout.splitlines():
+        pid, _, cmd = line.strip().partition(" ")
+        if cmd.strip().endswith("Claude.app/Contents/MacOS/Claude"):
+            return pid
+    return None
+
+
+def press(ax, check_only=False):
+    pid = app_pid()
+    if not pid:
+        raise rs.Fail("the Claude desktop app is not running")
+    r = subprocess.run([ax, pid, "AXCheckBox", "Remote Control"] + ([] if check_only else ["press"]),
+                       capture_output=True, text=True)
+    return r.returncode, r.stdout.strip()
+
+
+def open_url(url):
+    subprocess.run([shutil.which("open") or "/usr/bin/open", url], check=True)
+
+
+def rc_on(sid, pos):
+    ax = ax_press()
+    if not ax:
+        print("Remote Control not turned on: the ax-press helper is missing (it needs the Swift compiler: "
+              "xcode-select --install). Turn it on with the Remote Control switch in the session panel.")
+        return
+    wait_log(pos, f"Session {sid} warmed", 30)
+    time.sleep(1.5)
+    code, out = press(ax, check_only=True)  # AXValue 1 = already on: leave it
+    if out.endswith("value: 1"):
+        print("Remote Control was already on (not touched)")
+        return
+    pos2 = log_size()
+    code, out = press(ax)
+    if code != 0:
+        raise rs.Fail(f"Remote Control switch not found on screen: {out}. If this runs inside a desktop app "
+                      f"session, turn it on from there or in the panel.")
+    if not wait_log(pos2, f"toggleRemoteControl: sessionId={sid}", 10):
+        raise rs.Fail(f"pressed, but the app log shows no toggle for this session: {out}")
+    if f"sessionId={sid} enable=false" in log_since(pos2):
+        press(ax)  # it was on: undo the switch-off
+        print("Remote Control was already on (kept)")
+        return
+    for attempt in (1, 2):
+        end = time.time() + 75  # the app gives up by itself after about 60 s
+        while time.time() < end:
+            txt = log_since(pos2)
+            if "Remote control enabled" in txt:
+                line = [x for x in txt.splitlines() if "Remote control enabled" in x][-1]
+                url = line.split('"')[1] if line.count('"') >= 2 else line
+                print(f"Remote Control on: {url}")
+                return
+            if f"Failed to toggle remote control for {sid}" in txt:
+                break
+            time.sleep(1)
+        if attempt == 1:
+            print("Remote Control did not connect (app timeout); trying again")
+            pos2 = log_size()
+            press(ax)
+    raise rs.Fail(f"Remote Control did not connect in 2 attempts (see {LOG}: 'Failed to toggle remote control')")
+
+
+def new_session(a):
+    if len(a) < 2 or a[1].startswith("--"):
+        raise rs.Fail('usage: claude-desk new <folder> [--msg "text"] [--no-rc]')
+    raw = a[1]
+    folder = rs.expand(raw) if raw.startswith(("/", "~")) else os.path.join(rs.projects_root(), raw)
+    os.makedirs(folder, exist_ok=True)
+    name = os.path.basename(folder)
+    msg = a[a.index("--msg") + 1] if "--msg" in a and a.index("--msg") + 1 < len(a) else (
+        f"New session started by claude-desk in the folder {name}. Do not do any task yet. "
+        f"Reply only: 'Session {name} ready. What are we doing?'")
+    cli = str(uuid.uuid4())
+    r = subprocess.run(shlex.split(rs.claude_cmd()) + ["-p", "--session-id", cli, msg], cwd=folder,
+                       stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=300)
+    if r.returncode != 0:
+        raise rs.Fail(f"claude -p failed ({r.returncode}): {(r.stderr or r.stdout)[-400:]}")
+    print(f"session created in {folder}: {r.stdout.strip()[:200]}")
+    sid = f"local_{cli}"
+    pos = log_size()
+    open_url(f"claude://resume?session={cli}")
+    if not wait_log(pos, f"as Desktop session {sid}", 30):
+        raise rs.Fail(f"the app did not import {cli} in 30 s (see {LOG}: 'Resume deep link')")
+    print(f"imported into the app: {sid}")
+    if "--no-rc" not in a:
+        rc_on(sid, pos)
+
+
+def main():
+    rs.scrub_env()
+    a = sys.argv[1:]
+    if not a or a[0] in ("-h", "--help"):
+        print(__doc__)
+        return
+    if a[0] == "--list":
+        n = int(a[1]) if len(a) > 1 else 15
+        rs.print_json([short(d) for d in sessions()[:n]])
+        return
+    if not rs.is_mac():
+        raise rs.Fail("macOS only (it drives the Claude desktop app).")
+    if a[0] == "new":
+        new_session(a)
+        return
+    d = resolve(a[0])
+    sid = d["sessionId"]
+    pos = log_size()
+    open_url(f"claude://code/continue?session={sid}")
+    if not wait_log(pos, f"setFocusedSession: sessionId={sid}", 15):
+        focus = [x for x in log_since(max(0, pos - 2_000_000)).splitlines() if "setFocusedSession: sessionId=" in x]
+        if not (focus and focus[-1].endswith(sid)):  # already focused: the app does not log it again
+            raise rs.Fail(f"the app did not focus {sid} in 15 s (see {LOG})")
+    print(f"opened: {d.get('title', '')} ({sid})")
+    if "--no-rc" not in a:
+        rc_on(sid, pos)
+
+
+if __name__ == "__main__":
+    try:
+        main()
+    except rs.Fail as e:
+        sys.exit(f"claude-desk: {e}")

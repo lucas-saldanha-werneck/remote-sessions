@@ -1,0 +1,20 @@
+{
+  "name": "remote-sessions",
+  "version": "0.1.0",
+  "description": "Open, resume and fork Claude Code sessions on your computer from the phone: a new terminal window per session, Remote Control on, picked from numbered project, folder and session lists.",
+  "author": {
+    "name": "Lucas Saldanha Werneck",
+    "url": "https://github.com/lucas-saldanha-werneck"
+  },
+  "homepage": "https://github.com/lucas-saldanha-werneck/remote-sessions",
+  "repository": "https://github.com/lucas-saldanha-werneck/remote-sessions",
+  "license": "MIT",
+  "keywords": [
+    "remote-control",
+    "sessions",
+    "resume",
+    "fork",
+    "iterm",
+    "tmux"
+  ]
+}

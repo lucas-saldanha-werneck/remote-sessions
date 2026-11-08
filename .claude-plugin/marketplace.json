@@ -1,0 +1,15 @@
+{
+  "name": "remote-sessions",
+  "description": "Open, resume and fork Claude Code sessions on your computer from the phone, with Remote Control on.",
+  "owner": {
+    "name": "Lucas Saldanha Werneck",
+    "url": "https://github.com/lucas-saldanha-werneck"
+  },
+  "plugins": [
+    {
+      "name": "remote-sessions",
+      "source": "./",
+      "description": "Open, resume and fork Claude Code sessions on your computer from the phone: a new terminal window per session, Remote Control on, picked from numbered project, folder and session lists."
+    }
+  ]
+}

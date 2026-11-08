@@ -1,0 +1,98 @@
+#!/usr/bin/env python3
+"""claude-fork: fork a Claude Code session into an independent copy (new session id, the original is not
+touched) that starts with Remote Control on, in its own window, so you can fork from your phone.
+
+  claude-fork [session-id] [--name <name>] [--dir <folder>] [--dry-run]
+
+  session-id   the session to fork (default: $CLAUDE_CODE_SESSION_ID, the session that runs this command)
+  --name       name of the copy in the app and in /resume (letters, digits, spaces, hyphens;
+               default "fork <first 8 chars of the id>")
+  --dir        folder the copy runs in (default: the current folder; must be the original's folder)
+  --dry-run    print what would run; start nothing
+
+With tmux installed, the copy runs in its own tmux session (fork-HHMMSS) and, on macOS, a new iTerm or
+Terminal window is attached to it. Without tmux, macOS opens a window that runs the copy directly.
+To discard a copy: exit it, or `tmux kill-session -t fork-HHMMSS`.
+"""
+import os, re, shlex, sys, time
+
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.realpath(__file__))), "lib"))
+import remote_sessions as rs  # noqa: E402
+
+
+def main():
+    own = os.environ.get("CLAUDE_CODE_SESSION_ID", "")
+    rs.scrub_env()
+    argv, opts, args = sys.argv[1:], {}, []
+    i = 0
+    while i < len(argv):
+        a = argv[i]
+        if a in ("-h", "--help"):
+            print(__doc__)
+            return
+        if a in ("--name", "--dir"):
+            if i + 1 >= len(argv):
+                raise rs.Fail(f"{a} needs a value")
+            opts[a] = argv[i + 1]
+            i += 2
+            continue
+        if a == "--dry-run":
+            opts[a] = True
+        elif a.startswith("--"):
+            raise rs.Fail(f"unknown option {a}. See claude-fork --help.")
+        else:
+            args.append(a)
+        i += 1
+    sid = args[0] if args else own
+    if not sid:
+        raise rs.Fail("no session id given and $CLAUDE_CODE_SESSION_ID is not set.")
+    if not re.fullmatch(r"[0-9A-Fa-f-]{8,64}", sid):
+        raise rs.Fail(f"'{sid}' does not look like a session id.")
+    name = (opts.get("--name") or f"fork {sid[:8]}").strip()
+    if not re.fullmatch(r"[\w -]{1,60}", name):
+        raise rs.Fail("--name may only have letters, digits, spaces and hyphens (60 chars max).")
+    folder = rs.expand(opts.get("--dir") or os.getcwd())
+    if not os.path.isdir(folder):
+        raise rs.Fail(f"folder not found: {folder}")
+
+    env = [] if opts.get("--dry-run") else rs.precheck_env()
+    claude = " ".join(env + [rs.claude_cmd(), "--resume", shlex.quote(sid), "--fork-session",
+                             "--remote-control", shlex.quote(name), "-n", shlex.quote(name)])
+    script = rs.unset_snippet() + f"cd {shlex.quote(folder)} && " + claude
+    tmux = rs.tmux_bin()
+    session = "fork-" + time.strftime("%H%M%S")
+    want = (rs.setting("TERMINAL", "auto") or "auto").lower()
+    window = None
+    if want != "tmux" and rs.osascript():
+        try:
+            window = rs.pick_terminal()
+        except rs.Fail:
+            window = None
+    if not tmux and not window:
+        raise rs.Fail("needs tmux, or macOS with iTerm or Terminal.")
+
+    if opts.get("--dry-run"):
+        print(f"folder: {folder}\nname: {name}\ncommand: {script}")
+        print(f"tmux: {session}" if tmux else "tmux: not installed")
+        print(f"window: {window or 'none (detached)'}")
+        return
+
+    if tmux:
+        rs.start_tmux(session, folder, script)
+        print(f"tmux: {session}")
+        if window:
+            rs.open_window(window, f"{shlex.quote(tmux)} attach -t {session}")
+            print(f"window opened ({window}) attached to {session}")
+        else:
+            print(f"no window (detached); attach with: tmux attach -t {session}")
+    else:
+        rs.open_window(window, rs.sh_line(script))
+        print(f"window opened ({window}); no tmux, so the copy runs directly in it")
+    print(f"fork: {name} (from {sid[:8]}); it should appear in the Claude app's session list shortly")
+
+
+if __name__ == "__main__":
+    try:
+        main()
+    except rs.Fail as e:
+        sys.exit(f"claude-fork: {e}")

@@ -1,0 +1,351 @@
+#!/usr/bin/env python3
+"""Tests for claude-open, claude-fork and claude-desk. Nothing real is opened: the projects root, the
+Claude config folder and the desktop app folder are temporary, and `claude`, `osascript` and `tmux` are
+fakes that only record their arguments. Tests that need POSIX fake binaries skip on Windows.
+
+Run: python3 tests/test_remote_sessions.py -v"""
+import json, os, shutil, stat, subprocess, sys, tempfile, time, unittest
+
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+BIN = os.path.join(ROOT, "bin")
+sys.path.insert(0, os.path.join(ROOT, "lib"))
+import remote_sessions as rs  # noqa: E402
+
+WINDOWS = os.name == "nt"
+POSIX_ONLY = unittest.skipIf(WINDOWS, "needs POSIX shell fakes (osascript/tmux), not available on Windows")
+PY = sys.executable.replace("\\", "/")
+
+FAKE_CLAUDE = r'''import json, os, sys
+with open(os.environ["FAKE_LOG"], "a", encoding="utf-8") as f:
+    f.write("claude " + " ".join(sys.argv[1:]) + "\n")
+if sys.argv[1:3] == ["agents", "--json"]:
+    print(json.dumps([{"sessionId": s, "pid": 123} for s in os.environ.get("FAKE_OPEN", "").split()]))
+'''
+
+FAKE_RECORDER = '''#!/bin/sh
+# records its name and each argument on its own line, then a separator
+{ echo "== $(basename "$0")"; for a in "$@"; do printf '%s\\n' "$a"; done; } >> "$FAKE_LOG"
+exit 0
+'''
+
+
+def write(path, text, mode=None):
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "w", encoding="utf-8", newline="\n") as f:
+        f.write(text)
+    if mode:
+        os.chmod(path, mode)
+
+
+class Base(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp(prefix="remote-sessions-test-")
+        self.root = os.path.join(self.tmp, "Projects")
+        self.cfg = os.path.join(self.tmp, "claude")
+        self.log = os.path.join(self.tmp, "calls.log")
+        self.fakebin = os.path.join(self.tmp, "fakebin")
+        os.makedirs(self.root)
+        write(os.path.join(self.tmp, "fake_claude.py"), FAKE_CLAUDE)
+        for name in ("osascript", "tmux"):
+            write(os.path.join(self.fakebin, name), FAKE_RECORDER, 0o755)
+        self.env = {k: v for k, v in os.environ.items()
+                    if not k.startswith(("REMOTE_SESSIONS_", "CLAUDE")) and k not in ("TMUX", "XDG_CONFIG_HOME")}
+        self.env.update({
+            "HOME": self.tmp, "USERPROFILE": self.tmp,
+            "REMOTE_SESSIONS_ROOT": self.root,
+            "REMOTE_SESSIONS_CONFIG": os.path.join(self.tmp, "config"),
+            "REMOTE_SESSIONS_CLAUDE": f'"{PY}" "{os.path.join(self.tmp, "fake_claude.py").replace(chr(92), "/")}"',
+            "CLAUDE_CONFIG_DIR": self.cfg,
+            "FAKE_LOG": self.log,
+            "PATH": self.fakebin + os.pathsep + os.environ.get("PATH", ""),
+            "PYTHONIOENCODING": "utf-8",
+        })
+        self.t0 = time.time() - 10000
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def session(self, rel, sid, title=None, first=None, entry="cli", age=0, custom=None):
+        """Writes a session transcript for folder `rel` (relative to the root)."""
+        path = self.root if rel == "." else os.path.join(self.root, *rel.split("/"))
+        os.makedirs(path, exist_ok=True)
+        lines = [{"type": "system", "entrypoint": entry}]
+        if first:
+            lines.append({"type": "user", "message": {"content": first}})
+        if title:
+            lines.append({"type": "ai-title", "aiTitle": title})
+        if custom:
+            lines.append({"type": "custom-title", "customTitle": custom})
+        f = os.path.join(self.cfg, "projects", rs.encode(path), sid + ".jsonl")
+        write(f, "\n".join(json.dumps(x, separators=(",", ":")) for x in lines) + "\n")
+        t = self.t0 + age
+        os.utime(f, (t, t))
+        return f
+
+    def run_cmd(self, name, *args, env=None):
+        e = dict(self.env, **(env or {}))
+        return subprocess.run([sys.executable, os.path.join(BIN, name)] + list(args), env=e,
+                              capture_output=True, text=True, encoding="utf-8", cwd=self.tmp)
+
+    def calls(self):
+        try:
+            with open(self.log, encoding="utf-8") as f:
+                return f.read()
+        except OSError:
+            return ""
+
+
+class TestOpen(Base):
+    def tree(self):
+        self.session("alpha", "a1111111-0000-0000-0000-000000000001", first="fix the parser", age=100)
+        self.session("alpha", "a2222222-0000-0000-0000-000000000002", title="AI title", custom="My custom",
+                     first="hello", age=300)
+        self.session("alpha", "a3333333-0000-0000-0000-000000000003", age=50)                # empty: skipped
+        self.session("alpha", "a4444444-0000-0000-0000-000000000004", first="robot", entry="sdk-cli", age=400)
+        self.session("beta/sub", "b1111111-0000-0000-0000-000000000001", first="deep work", age=200)
+        self.session("web-site/front", "c1111111-0000-0000-0000-000000000001", first="css", age=10)
+        self.session("tools", "d1111111-0000-0000-0000-000000000001", first="x", entry="sdk-py", age=500)
+        self.session("alpha/.claude/worktrees/wt1", "e1111111-0000-0000-0000-000000000001", first="wt", age=600)
+        gone = self.session("deleted", "f1111111-0000-0000-0000-000000000001", first="old", age=700)
+        shutil.rmtree(os.path.join(self.root, "deleted"))
+        os.makedirs(os.path.join(self.root, "gamma-docs"))
+        return gone
+
+    def test_projects_top_level(self):
+        self.tree()
+        r = self.run_cmd("claude-open", "--projects")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        got = json.loads(r.stdout)
+        names = [x["folder"] for x in got]
+        self.assertEqual(names, ["alpha", "beta", "web-site"])  # newest first; no sdk-only, gone or doc-only
+        alpha = got[0]
+        self.assertEqual((alpha["sessions"], alpha["subfolders"]), (3, 0))  # sdk run not counted, worktree out
+        self.assertEqual((got[1]["sessions"], got[1]["subfolders"]), (0, 1))
+
+    def test_projects_one_level_down_and_dash_names(self):
+        self.tree()
+        r = self.run_cmd("claude-open", "--projects", "beta")
+        self.assertEqual([x["folder"] for x in json.loads(r.stdout)], ["beta/sub"])
+        r = self.run_cmd("claude-open", "--projects", "web-site")
+        self.assertEqual([x["folder"] for x in json.loads(r.stdout)], ["web-site/front"])
+
+    def test_list_titles_order_and_open_flag(self):
+        self.tree()
+        r = self.run_cmd("claude-open", "alpha", "--list", env={"FAKE_OPEN": "a1111111-0000-0000-0000-000000000001"})
+        self.assertEqual(r.returncode, 0, r.stderr)
+        got = json.loads(r.stdout)
+        self.assertEqual(got["folder"], "alpha")
+        self.assertEqual([(s["title"], s["open"]) for s in got["sessions"]],
+                         [("My custom", False), ("fix the parser", True)])
+
+    def test_fuzzy_names(self):
+        self.tree()
+        r = self.run_cmd("claude-open", "alpah", "--list")
+        self.assertEqual(json.loads(r.stdout)["folder"], "alpha")
+        r = self.run_cmd("claude-open", "beta/sbu", "--list")
+        self.assertEqual(json.loads(r.stdout)["folder"], "beta/sub")
+        r = self.run_cmd("claude-open", "front", "--list")  # deep folder found through its sessions
+        self.assertEqual(json.loads(r.stdout)["folder"], "web-site/front")
+        r = self.run_cmd("claude-open", "zzzzqqq", "--list")
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("nothing close to 'zzzzqqq'", r.stderr)
+
+    def test_ambiguous_name(self):
+        os.makedirs(os.path.join(self.root, "notes-old"))
+        os.makedirs(os.path.join(self.root, "notes-new"))
+        r = self.run_cmd("claude-open", "notes", "--list")
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("ambiguous", r.stderr)
+
+    def test_create(self):
+        r = self.run_cmd("claude-open", "brand-new", "--create", "--list")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertTrue(os.path.isdir(os.path.join(self.root, "brand-new")))
+
+    def test_new_subfolder(self):
+        self.tree()
+        r = self.run_cmd("claude-open", "beta", "--new", "fresh", "--dry-run")
+        self.assertIn("would create: beta/fresh", r.stdout)
+        self.assertFalse(os.path.exists(os.path.join(self.root, "beta", "fresh")))
+        r = self.run_cmd("claude-open", "beta", "--new", "sub", "--dry-run")
+        self.assertIn("already exists", r.stderr)
+        r = self.run_cmd("claude-open", "beta", "--new", "../x")
+        self.assertIn("--new needs a folder name", r.stderr)
+
+    def test_dry_run_new_session(self):
+        self.tree()
+        r = self.run_cmd("claude-open", "alpha", "--name", "parser", "--prompt", "start here", "--dry-run",
+                         env={"REMOTE_SESSIONS_TERMINAL": "tmux"})
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("folder: alpha", r.stdout)
+        self.assertIn("--remote-control 'alpha · parser' -n 'alpha · parser' 'start here'", r.stdout)
+        self.assertIn("unset CLAUDECODE", r.stdout)
+        self.assertIn("cd ", r.stdout)
+
+    def test_resume_last_open_and_force(self):
+        self.tree()
+        r = self.run_cmd("claude-open", "alpha", "--resume", "last", "--dry-run")
+        self.assertIn("--resume a2222222-0000-0000-0000-000000000002 --remote-control", r.stdout)  # newest conversation
+        r = self.run_cmd("claude-open", "alpha", "--resume", "a1111111", "--dry-run",
+                         env={"FAKE_OPEN": "a1111111-0000-0000-0000-000000000001"})
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("already running", r.stderr)
+        r = self.run_cmd("claude-open", "alpha", "--resume", "a1111111", "--force", "--dry-run",
+                         env={"FAKE_OPEN": "a1111111-0000-0000-0000-000000000001"})
+        self.assertEqual(r.returncode, 0, r.stderr)
+        r = self.run_cmd("claude-open", "alpha", "--resume", "nope")
+        self.assertIn("not found", r.stderr)
+
+    def test_missing_root_and_config_file(self):
+        missing = os.path.join(self.tmp, "nope")
+        r = self.run_cmd("claude-open", "--projects", env={"REMOTE_SESSIONS_ROOT": missing})
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("projects root not found", r.stderr)
+        self.assertIn("REMOTE_SESSIONS_ROOT", r.stderr)
+        other = os.path.join(self.tmp, "Work")
+        os.makedirs(os.path.join(other, "proj"))
+        write(self.env["REMOTE_SESSIONS_CONFIG"], f'# test\nROOT="{other}"\n')
+        e = {k: v for k, v in self.env.items() if k != "REMOTE_SESSIONS_ROOT"}
+        r = subprocess.run([sys.executable, os.path.join(BIN, "claude-open"), "proj", "--list"], env=e,
+                           capture_output=True, text=True, encoding="utf-8")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(json.loads(r.stdout), {"folder": "proj", "sessions": []})
+
+    @POSIX_ONLY
+    def test_launch_iterm(self):
+        self.tree()
+        r = self.run_cmd("claude-open", "alpha", env={"REMOTE_SESSIONS_TERMINAL": "iterm"})
+        self.assertEqual(r.returncode, 0, r.stderr)
+        c = self.calls()
+        self.assertIn("== osascript", c)
+        self.assertIn('tell application "iTerm"', c)
+        self.assertIn('write text "/bin/sh -c ', c)
+        self.assertIn("window opened (iterm)", r.stdout)
+
+    @POSIX_ONLY
+    def test_launch_terminal_app(self):
+        self.tree()
+        r = self.run_cmd("claude-open", "alpha", env={"REMOTE_SESSIONS_TERMINAL": "terminal"})
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn('tell application "Terminal"', self.calls())
+        self.assertIn("do script", self.calls())
+
+    @POSIX_ONLY
+    def test_launch_tmux_with_failed_precheck(self):
+        self.tree()
+        r = self.run_cmd("claude-open", "alpha", "--tmux", env={"REMOTE_SESSIONS_PRECHECK": "exit 3",
+                                                                "REMOTE_SESSIONS_PRECHECK_FAIL_ENV": "SKIP_SECRETS=1"})
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("warning: the precheck", r.stdout)
+        c = self.calls().split("\n")
+        self.assertIn("== tmux", c)
+        i = c.index("new-session")
+        self.assertEqual(c[i + 1:i + 3], ["-d", "-s"])
+        self.assertTrue(c[i + 3].startswith("claude-alpha-"))
+        self.assertEqual(c[i + 4:i + 6], ["-c", os.path.join(self.root, "alpha")])
+        self.assertEqual(c[i + 6:i + 8], ["/bin/sh", "-c"])
+        self.assertIn("SKIP_SECRETS=1 ", c[i + 8])
+        self.assertNotIn("osascript", self.calls())
+
+    def test_unknown_terminal(self):
+        self.tree()
+        r = self.run_cmd("claude-open", "alpha", env={"REMOTE_SESSIONS_TERMINAL": "kitty"})
+        self.assertIn("unknown terminal 'kitty'", r.stderr)
+
+
+class TestLib(unittest.TestCase):
+    def test_applescript_escaping(self):
+        self.assertEqual(rs.applescript_string('a "b" \\c'), '"a \\"b\\" \\\\c"')
+
+    def test_encode(self):
+        self.assertEqual(rs.encode("/home/u/my.app"), "-home-u-my-app")
+
+    @POSIX_ONLY
+    def test_unset_snippet_runs_in_sh(self):
+        env = dict(os.environ, CLAUDECODE="1", CLAUDE_CODE_CHILD_SESSION="1", CLAUDE_PREVIEW_X="1",
+                   CLAUDE_AGENT_SDK_Y="1", CLAUDE_CODE_USE_BEDROCK="1", REMOTE_SESSIONS_KEEP_ENV="CLAUDE_PREVIEW_X")
+        os.environ["REMOTE_SESSIONS_KEEP_ENV"] = "CLAUDE_PREVIEW_X"
+        try:
+            snippet = rs.unset_snippet()
+        finally:
+            del os.environ["REMOTE_SESSIONS_KEEP_ENV"]
+        out = subprocess.run(["/bin/sh", "-c", snippet + "env"], env=env, capture_output=True, text=True).stdout
+        names = {line.split("=", 1)[0] for line in out.splitlines()}
+        self.assertNotIn("CLAUDECODE", names)
+        self.assertNotIn("CLAUDE_CODE_CHILD_SESSION", names)
+        self.assertNotIn("CLAUDE_AGENT_SDK_Y", names)
+        self.assertIn("CLAUDE_PREVIEW_X", names)        # kept on request
+        self.assertIn("CLAUDE_CODE_USE_BEDROCK", names)  # user settings are not session variables
+
+
+class TestFork(Base):
+    SID = "12345678-aaaa-bbbb-cccc-1234567890ab"
+
+    def test_dry_run_uses_own_session_id(self):
+        r = self.run_cmd("claude-fork", "--name", "try other way", "--dry-run",
+                         env={"CLAUDE_CODE_SESSION_ID": self.SID, "REMOTE_SESSIONS_TERMINAL": "tmux"})
+        if "needs tmux" in r.stderr:
+            self.skipTest("tmux fake not usable on this platform")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn(f"--resume {self.SID} --fork-session --remote-control 'try other way' -n 'try other way'",
+                      r.stdout)
+        self.assertIn("unset CLAUDECODE", r.stdout)
+
+    def test_errors(self):
+        r = self.run_cmd("claude-fork", "--dry-run")
+        self.assertIn("no session id given", r.stderr)
+        r = self.run_cmd("claude-fork", "not-an-id!", "--dry-run")
+        self.assertIn("does not look like a session id", r.stderr)
+        r = self.run_cmd("claude-fork", self.SID, "--name", "bad'name", "--dry-run")
+        self.assertIn("--name may only have", r.stderr)
+
+    @POSIX_ONLY
+    def test_launch_tmux_and_window(self):
+        r = self.run_cmd("claude-fork", self.SID, env={"REMOTE_SESSIONS_TERMINAL": "iterm"})
+        self.assertEqual(r.returncode, 0, r.stderr)
+        c = self.calls()
+        self.assertIn("== tmux", c)
+        self.assertIn("--fork-session", c)
+        self.assertIn("--remote-control 'fork 12345678'", c)
+        self.assertIn("== osascript", c)
+        self.assertRegex(c, r"attach -t fork-\d{6}")
+
+    @POSIX_ONLY
+    def test_detached_only(self):
+        r = self.run_cmd("claude-fork", self.SID, env={"REMOTE_SESSIONS_TERMINAL": "tmux"})
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("no window (detached)", r.stdout)
+        self.assertNotIn("osascript", self.calls())
+
+
+class TestDesk(Base):
+    def setUp(self):
+        super().setUp()
+        self.desk = os.path.join(self.tmp, "desk")
+        self.env["REMOTE_SESSIONS_DESKTOP_SESSIONS"] = self.desk
+        self.env["REMOTE_SESSIONS_DESKTOP_LOG"] = os.path.join(self.tmp, "main.log")
+        for i, (title, archived, rc) in enumerate([("Old", False, False), ("Newest", False, True),
+                                                   ("Archived", True, False)]):
+            write(os.path.join(self.desk, "acct", "org", f"local_{i}.json"), json.dumps({
+                "sessionId": f"local_0000000{i}-0000-0000-0000-000000000000", "title": title,
+                "cwd": os.path.join(self.tmp, "Projects", title.lower()), "lastActivityAt": (1000 + i) * 1000,
+                "isArchived": archived, "remoteControlUserEnabled": rc}))
+
+    def test_list(self):
+        r = self.run_cmd("claude-desk", "--list")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        got = json.loads(r.stdout)
+        self.assertEqual([(d["title"], d["rc"]) for d in got], [("Newest", True), ("Old", False)])
+        self.assertTrue(got[0]["folder"].startswith("~"))
+
+    def test_open_needs_mac_or_match(self):
+        r = self.run_cmd("claude-desk", "no-such-session-text")
+        self.assertNotEqual(r.returncode, 0)
+        if sys.platform == "darwin":
+            self.assertIn("no desktop session matches", r.stderr)
+        else:
+            self.assertIn("macOS only", r.stderr)
+
+
+if __name__ == "__main__":
+    unittest.main()
