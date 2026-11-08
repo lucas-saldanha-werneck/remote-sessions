@@ -111,6 +111,38 @@ def _read_config():
     return out
 
 
+# The starter config: config.example at the plugin / repo root (install.sh links to the clone, so it is there too).
+STARTER = os.path.join(os.path.dirname(os.path.dirname(os.path.realpath(__file__))), "config.example")
+
+
+def seed_config(dest=None, starter=None):
+    """First run: copy the starter to the config file when that file does not exist, creating its folder.
+    Never overwrites or changes an existing file, never raises, prints nothing. Returns the path it wrote,
+    else None. The starter has every option commented out, so it behaves exactly like no file."""
+    try:
+        dest = dest or _config_file()
+        starter = starter or STARTER
+        if os.path.lexists(dest) or not os.path.isfile(starter):
+            return None
+        with open(starter, "rb") as fh:
+            data = fh.read()
+        os.makedirs(os.path.dirname(os.path.abspath(dest)), exist_ok=True)
+        # O_EXCL: a file that appears between the check and here is left alone
+        fd = os.open(dest, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_BINARY", 0), 0o644)
+        try:
+            with os.fdopen(fd, "wb") as fh:
+                fh.write(data)
+        except Exception:
+            try:
+                os.remove(dest)   # created by us a moment ago: do not leave half a file
+            except OSError:
+                pass
+            return None
+        return dest
+    except Exception:
+        return None
+
+
 _CONFIG = None
 
 
@@ -647,3 +679,9 @@ def start_tmux(session, path, script):
     keep_shell = 'exec "${SHELL:-/bin/sh}" -l'
     subprocess.run([tmux_bin(), "new-session", "-d", "-s", session, "-c", path] +
                    run_shell() + [script + "; " + keep_shell], check=True)
+
+
+if __name__ == "__main__":   # the plugin's SessionStart hook: python3 lib/remote_sessions.py --seed
+    if "--seed" in sys.argv[1:]:
+        seed_config()
+    sys.exit(0)

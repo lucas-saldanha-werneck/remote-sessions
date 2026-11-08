@@ -21,6 +21,7 @@ import remote_sessions as rs  # noqa: E402
 
 
 def main():
+    rs.seed_config()   # first run: create ~/.config/remote-sessions/config from the starter (never changes it)
     own = os.environ.get("CLAUDE_CODE_SESSION_ID", "")
     rs.scrub_env()
     argv, opts, args = sys.argv[1:], {}, []

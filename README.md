@@ -56,6 +56,14 @@ cd remote-sessions && ./install.sh          # symlinks into ~/.local/bin (--pref
 
 `install.sh` never replaces a file it did not install (unless `--force`). On macOS with the Swift compiler it also builds the small `ax-press` helper that `claude-desk` uses; otherwise `claude-desk` builds it on first use.
 
+## Your settings
+
+Your settings are in `~/.config/remote-sessions/config` (or `$REMOTE_SESSIONS_CONFIG`; `$XDG_CONFIG_HOME` is
+respected). You do not have to create it: the first time the plugin starts a session, or `claude-open`,
+`claude-fork` or `claude-desk` runs, it is created from [`config.example`](config.example), which lists every
+option with its default, commented out, so it changes nothing until you edit a line. A file that already
+exists is never changed, and plugin updates or a `git pull` never touch it.
+
 ## Configuration
 
 Environment variables, or the same keys without the `REMOTE_SESSIONS_` prefix in `~/.config/remote-sessions/config` (`KEY=value` lines).

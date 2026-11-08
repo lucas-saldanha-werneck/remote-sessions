@@ -568,5 +568,110 @@ class TestDesk(Base):
             self.assertIn("macOS only", r.stderr)
 
 
+class SeedConfig(Base):
+    """The first run creates ~/.config/remote-sessions/config from config.example, and never touches a file
+    that already exists."""
+    STARTER = os.path.join(ROOT, "config.example")
+
+    def setUp(self):
+        super().setUp()
+        del self.env["REMOTE_SESSIONS_CONFIG"]
+        self.dest = os.path.join(self.tmp, ".config", "remote-sessions", "config")
+
+    def seed(self, **env):
+        return subprocess.run([sys.executable, os.path.join(ROOT, "lib", "remote_sessions.py"), "--seed"],
+                              capture_output=True, text=True, env=dict(self.env, **env))
+
+    def bytes(self, p):
+        with open(p, "rb") as f:
+            return f.read()
+
+    def test_missing_config_is_created_with_the_defaults(self):
+        r = self.seed()
+        self.assertEqual((r.returncode, r.stdout, r.stderr), (0, "", ""))
+        self.assertEqual(self.bytes(self.dest), self.bytes(self.STARTER))
+
+    def test_each_command_seeds_on_first_use(self):
+        for cmd, args in (("claude-open", ["--projects"]), ("claude-fork", ["--help"]), ("claude-desk", ["--list"])):
+            if os.path.exists(self.dest):
+                os.remove(self.dest)
+            self.run_cmd(cmd, *args)
+            self.assertEqual(self.bytes(self.dest), self.bytes(self.STARTER), cmd)
+
+    def test_existing_config_is_never_changed(self):
+        os.makedirs(os.path.dirname(self.dest))
+        with open(self.dest, "wb") as f:
+            f.write(b"TERMINAL=tmux\r\n")
+        os.utime(self.dest, (1000000000, 1000000000))
+        for _ in range(2):
+            self.assertEqual(self.seed().returncode, 0)
+            self.run_cmd("claude-open", "--projects")
+        self.assertEqual(self.bytes(self.dest), b"TERMINAL=tmux\r\n")
+        self.assertEqual(os.stat(self.dest).st_mtime, 1000000000)
+
+    def test_env_overrides_are_respected(self):
+        alt = os.path.join(self.tmp, "alt", "rs.conf")
+        x = os.path.join(self.tmp, "x")
+        self.assertEqual(self.seed(REMOTE_SESSIONS_CONFIG=alt, XDG_CONFIG_HOME=x).returncode, 0)
+        self.assertEqual(self.bytes(alt), self.bytes(self.STARTER))
+        self.assertFalse(os.path.exists(x))
+        self.assertFalse(os.path.exists(os.path.join(self.tmp, ".config")))
+        xdg = os.path.join(self.tmp, "xdg")
+        self.assertEqual(self.seed(XDG_CONFIG_HOME=xdg).returncode, 0)
+        self.assertEqual(self.bytes(os.path.join(xdg, "remote-sessions", "config")), self.bytes(self.STARTER))
+        self.assertFalse(os.path.exists(os.path.join(self.tmp, ".config")))
+
+    def test_unwritable_place_does_not_crash(self):
+        write(os.path.join(self.tmp, ".config"), "x")   # a file where the folder should be
+        r = self.seed()
+        self.assertEqual((r.returncode, r.stdout, r.stderr), (0, "", ""))
+        r = self.run_cmd("claude-open", "--projects")
+        self.assertEqual(r.returncode, 0, r.stderr)
+
+    @unittest.skipIf(os.name == "nt" or (hasattr(os, "geteuid") and os.geteuid() == 0),
+                     "read-only folders are not enforced for Windows or root")
+    def test_read_only_folder_does_not_crash(self):
+        cfgdir = os.path.join(self.tmp, ".config")
+        os.makedirs(cfgdir)
+        os.chmod(cfgdir, 0o500)
+        try:
+            r = self.seed()
+            self.assertEqual((r.returncode, r.stderr), (0, ""))
+            self.assertEqual(os.listdir(cfgdir), [])
+        finally:
+            os.chmod(cfgdir, 0o700)
+
+    def test_seeded_config_behaves_like_no_config(self):
+        """The starter sets nothing: every key listed in it resolves to the same value as with no file, and a
+        whole dry run prints the same."""
+        code = ("import json,sys; sys.path.insert(0, sys.argv[1]); import remote_sessions as rs; "
+                "keys = sorted(l[2:].split('=')[0] for l in open(sys.argv[2]) "
+                "if l.startswith('# ') and '=' in l and l[2:].split('=')[0].isupper()); "
+                "print(json.dumps([rs._config(), {k: rs.setting(k, 'DEFAULT') for k in keys}]))")
+        env = {k: v for k, v in self.env.items() if not k.startswith("REMOTE_SESSIONS_")}
+        self.session("acme/api", "11111111-0000-4000-8000-000000000001", title="t")
+        outs = []
+        for seeded in (False, True):
+            if seeded:
+                self.assertEqual(self.seed().returncode, 0)
+                self.assertTrue(os.path.isfile(self.dest))
+            else:
+                self.assertFalse(os.path.exists(self.dest))
+            r = subprocess.run([sys.executable, "-c", code, os.path.join(ROOT, "lib"), self.STARTER],
+                               capture_output=True, text=True, env=env)
+            self.assertEqual(r.returncode, 0, r.stderr)
+            # a whole dry run with no config (path blocked, so nothing is seeded) and with the seeded file
+            blocked = os.path.join(self.tmp, "blocker")
+            write(blocked, "x")
+            cfg = self.dest if seeded else os.path.join(blocked, "config")
+            dry = self.run_cmd("claude-open", "acme/api", "--dry-run", "--tmux", env={"REMOTE_SESSIONS_CONFIG": cfg})
+            outs.append((json.loads(r.stdout), dry.returncode, dry.stdout, dry.stderr))
+        self.assertEqual(outs[0][0][0], {})
+        self.assertEqual(outs[0][1], 0, outs[0][3])
+        self.assertIn("api", outs[0][2])
+        self.assertEqual(outs[0], outs[1])
+        self.assertGreater(len(outs[0][0][1]), 15)   # every key of the starter was checked
+
+
 if __name__ == "__main__":
     unittest.main()

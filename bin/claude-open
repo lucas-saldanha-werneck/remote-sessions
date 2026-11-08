@@ -60,6 +60,7 @@ def parse(argv):
 
 def main():
     rs.scrub_env()
+    rs.seed_config()   # first run: create ~/.config/remote-sessions/config from the starter (never changes it)
     opts, flags, args = parse(sys.argv[1:])
     root = rs.projects_root()
     dry = "--dry-run" in flags

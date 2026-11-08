@@ -25,6 +25,10 @@ case "$(uname -s)" in
       [ "$(readlink "$P/$c")" = "$R/bin/$c" ] && ok "$c linked" || bad "$c not linked"
     done
     "$P/claude-open" --help >/dev/null 2>&1 && ok "linked claude-open runs" || bad "linked claude-open does not run"
+    mkdir -p "$W/projects"
+    env -u XDG_CONFIG_HOME -u REMOTE_SESSIONS_CONFIG REMOTE_SESSIONS_ROOT="$W/projects" "$P/claude-open" --projects >/dev/null 2>&1
+    cmp -s "$HOME/.config/remote-sessions/config" "$R/config.example" && ok "linked claude-open seeds ~/.config/remote-sessions/config" \
+      || bad "linked claude-open did not seed the config"
     bash "$R/install.sh" --prefix "$P" | grep -q "already installed" && ok "second install is a no-op" || bad "second install"
     rm "$P/claude-desk"; echo "mine" > "$P/claude-desk"
     bash "$R/install.sh" --prefix "$P" >/dev/null; rc=$?
