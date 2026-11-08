@@ -592,7 +592,8 @@ class SeedConfig(Base):
         self.assertEqual(self.bytes(self.dest), self.bytes(self.STARTER))
 
     def test_each_command_seeds_on_first_use(self):
-        for cmd, args in (("claude-open", ["--projects"]), ("claude-fork", ["--help"]), ("claude-desk", ["--list"])):
+        # claude-fork with a bad id: a real run that stops before opening anything
+        for cmd, args in (("claude-open", ["--projects"]), ("claude-fork", ["not-an-id"]), ("claude-desk", ["--list"])):
             if os.path.exists(self.dest):
                 os.remove(self.dest)
             self.run_cmd(cmd, *args)
@@ -605,9 +606,19 @@ class SeedConfig(Base):
         os.makedirs(os.path.join(xdg, "remote-sessions"))
         with open(os.path.join(xdg, "remote-sessions", "config"), "w") as f:
             f.write("# mine\n")
-        for cmd, args in (("claude-open", ["--projects"]), ("claude-fork", ["--help"]), ("claude-desk", ["--list"])):
+        for cmd, args in (("claude-open", ["--projects"]), ("claude-fork", ["not-an-id"]), ("claude-desk", ["--list"])):
             self.run_cmd(cmd, *args, env={"XDG_CONFIG_HOME": xdg, "REMOTE_SESSIONS_DROP_ENV": "XDG_CONFIG_HOME"})
             self.assertFalse(os.path.exists(self.dest), cmd)
+
+    def test_help_and_dry_run_leave_a_missing_config_missing(self):
+        self.session("acme/api", "11111111-0000-4000-8000-000000000001", title="t")
+        runs = [("claude-open", []), ("claude-open", ["--help"]), ("claude-open", ["-h"]),
+                ("claude-open", ["acme/api", "--dry-run", "--tmux"]),
+                ("claude-fork", ["--help"]), ("claude-fork", ["11111111-0000-4000-8000-000000000001", "--dry-run"]),
+                ("claude-desk", []), ("claude-desk", ["--help"])]
+        for cmd, args in runs:
+            self.run_cmd(cmd, *args)
+            self.assertFalse(os.path.exists(os.path.join(self.tmp, ".config")), (cmd, args))
 
     def test_existing_config_is_never_changed(self):
         os.makedirs(os.path.dirname(self.dest))

@@ -115,6 +115,13 @@ def _read_config():
 STARTER = os.path.join(os.path.dirname(os.path.dirname(os.path.realpath(__file__))), "config.example")
 
 
+def seed_for_run(argv, empty_is_help=False):
+    """The commands' first real run creates the config (seed_config). --help, -h and --dry-run write nothing,
+    nor does no argument at all where that only prints the help (empty_is_help)."""
+    if (argv or not empty_is_help) and not {"-h", "--help", "--dry-run"} & set(argv):
+        seed_config()
+
+
 def seed_config(dest=None, starter=None):
     """First run: copy the starter to the config file when that file does not exist, creating its folder.
     Never overwrites or changes an existing file, never raises, prints nothing. Returns the path it wrote,

@@ -24,8 +24,8 @@ case "$(uname -s)" in
     for c in claude-open claude-fork claude-desk; do
       [ "$(readlink "$P/$c")" = "$R/bin/$c" ] && ok "$c linked" || bad "$c not linked"
     done
-    # its own config path, so the seed check below is about the --projects call alone
-    REMOTE_SESSIONS_CONFIG="$W/help-config" "$P/claude-open" --help >/dev/null 2>&1 && ok "linked claude-open runs" || bad "linked claude-open does not run"
+    "$P/claude-open" --help >/dev/null 2>&1 && ok "linked claude-open runs" || bad "linked claude-open does not run"
+    [ ! -e "$HOME/.config" ] && ok "claude-open --help writes no config" || bad "claude-open --help created a config"
     mkdir -p "$W/projects"
     env -u XDG_CONFIG_HOME -u REMOTE_SESSIONS_CONFIG REMOTE_SESSIONS_ROOT="$W/projects" "$P/claude-open" --projects >/dev/null 2>&1
     cmp -s "$HOME/.config/remote-sessions/config" "$R/config.example" && ok "linked claude-open seeds ~/.config/remote-sessions/config" \

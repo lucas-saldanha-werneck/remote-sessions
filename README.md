@@ -60,7 +60,7 @@ cd remote-sessions && ./install.sh          # symlinks into ~/.local/bin (--pref
 
 Your settings are in `~/.config/remote-sessions/config` (or `$REMOTE_SESSIONS_CONFIG`; `$XDG_CONFIG_HOME` is
 respected). You do not have to create it: the first time the plugin starts a session, or `claude-open`,
-`claude-fork` or `claude-desk` runs, it is created from [`config.example`](config.example), which lists every
+`claude-fork` or `claude-desk` really runs (`--help` and `--dry-run` write nothing), it is created from [`config.example`](config.example), which lists every
 option with its default, commented out, so it changes nothing until you edit a line. A file that already
 exists is never changed, and plugin updates or a `git pull` never touch it.
 
