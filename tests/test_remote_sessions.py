@@ -313,7 +313,7 @@ class TestOptions(Base):
         write(os.path.join(self.fakebin, "tmux"), FAKE_RECORDER.replace(
             "exit 0", f'[ "$1" = list-sessions ] && [ ! -e "{up}" ] && exit 1\nexit 0'), 0o755)
         write(os.path.join(self.fakebin, "osascript"), FAKE_RECORDER.replace("exit 0", f'touch "{up}"\nexit 0'), 0o755)
-        e = {"REMOTE_SESSIONS_TMUX_SERVER_VIA_TERMINAL": "1"}
+        e = {"REMOTE_SESSIONS_TMUX_SERVER_VIA_TERMINAL": "1", "REMOTE_SESSIONS_TERMINAL": "terminal"}
         r = self.run_cmd("claude-open", "alpha", "--tmux", env=e)
         self.assertEqual(r.returncode, 0, r.stderr)
         c = self.calls()
@@ -396,8 +396,10 @@ class TestOptions(Base):
         write(os.path.join(self.fakebin, "tmux"), FAKE_RECORDER.replace(
             "exit 0", '[ "$1" = list-sessions ] && exit 1\nexit 0'), 0o755)
         write(os.path.join(self.fakebin, "osascript"), FAKE_RECORDER.replace("exit 0", "exit 1"), 0o755)
-        r = self.run_cmd("claude-open", "alpha", "--tmux", env={"REMOTE_SESSIONS_TMUX_SERVER_VIA_TERMINAL": "1"})
+        r = self.run_cmd("claude-open", "alpha", "--tmux", env={"REMOTE_SESSIONS_TMUX_SERVER_VIA_TERMINAL": "1",
+                                                                "REMOTE_SESSIONS_TERMINAL": "terminal"})
         self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("could not open a terminal window for the tmux server", r.stdout)
         self.assertIn("starting it from here", r.stdout)
         self.assertIn("\nnew-session\n", self.calls())
 
