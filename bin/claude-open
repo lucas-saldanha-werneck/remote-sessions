@@ -59,8 +59,9 @@ def parse(argv):
 
 
 def main():
-    rs.scrub_env()
+    # before scrub_env: REMOTE_SESSIONS_DROP_ENV may remove XDG_CONFIG_HOME, which names the config file
     rs.seed_config()   # first run: create ~/.config/remote-sessions/config from the starter (never changes it)
+    rs.scrub_env()
     opts, flags, args = parse(sys.argv[1:])
     root = rs.projects_root()
     dry = "--dry-run" in flags

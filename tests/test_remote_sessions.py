@@ -598,6 +598,17 @@ class SeedConfig(Base):
             self.run_cmd(cmd, *args)
             self.assertEqual(self.bytes(self.dest), self.bytes(self.STARTER), cmd)
 
+    def test_seed_uses_the_file_that_was_read_even_if_drop_env_removes_xdg(self):
+        # DROP_ENV may remove XDG_CONFIG_HOME before the new window opens; the seed must still look where
+        # the settings were read from, not create a second file under ~/.config.
+        xdg = os.path.join(self.tmp, "xdg")
+        os.makedirs(os.path.join(xdg, "remote-sessions"))
+        with open(os.path.join(xdg, "remote-sessions", "config"), "w") as f:
+            f.write("# mine\n")
+        for cmd, args in (("claude-open", ["--projects"]), ("claude-fork", ["--help"]), ("claude-desk", ["--list"])):
+            self.run_cmd(cmd, *args, env={"XDG_CONFIG_HOME": xdg, "REMOTE_SESSIONS_DROP_ENV": "XDG_CONFIG_HOME"})
+            self.assertFalse(os.path.exists(self.dest), cmd)
+
     def test_existing_config_is_never_changed(self):
         os.makedirs(os.path.dirname(self.dest))
         with open(self.dest, "wb") as f:
