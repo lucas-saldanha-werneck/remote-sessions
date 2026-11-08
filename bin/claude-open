@@ -126,12 +126,13 @@ def main():
         if not dry:
             raise
         kind = f"none ({e})"
+    in_tmux = kind == "tmux" or "--tmux" in flags  # a dry run without tmux installed still shows the env
     env = rs.env_pairs("TEAMS_ENV", "CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1") if "--teams" in flags else []
-    env += rs.env_pairs("TMUX_ENV") if kind == "tmux" else []
+    env += rs.env_pairs("TMUX_ENV") if in_tmux else []
     if not dry:
-        if kind == "tmux":
+        if in_tmux:
             rs.ensure_tmux_server()  # before the precheck, which may run inside the tmux server
-        env += rs.precheck_env(in_tmux=kind == "tmux")
+        env += rs.precheck_env(in_tmux=in_tmux)
 
     def build():
         return (rs.unset_snippet() + f"cd {shlex.quote(path)} && " +
