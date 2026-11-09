@@ -43,8 +43,8 @@ claude-desk --list                           # macOS: desktop app sessions
 In Claude Code:
 
 ```
-/plugin marketplace add lucas-saldanha-werneck/remote-sessions
-/plugin install remote-sessions@remote-sessions
+/plugin marketplace add lucas-saldanha-werneck/claude-plugins
+/plugin install remote-sessions@lucas-plugins
 ```
 
 The plugin puts `claude-open`, `claude-fork` and `claude-desk` on Claude's PATH. To use them in your own terminal too:
@@ -56,19 +56,18 @@ cd remote-sessions && ./install.sh          # symlinks into ~/.local/bin (--pref
 
 `install.sh` never replaces a file it did not install (unless `--force`). On macOS with the Swift compiler it also builds the small `ax-press` helper that `claude-desk` uses; otherwise `claude-desk` builds it on first use.
 
-## Your settings
+## Settings
 
 Your settings are in `~/.config/remote-sessions/config` (or `$REMOTE_SESSIONS_CONFIG`; `$XDG_CONFIG_HOME` is
-respected). You do not have to create it: the first time the plugin starts a session, or `claude-open`,
-`claude-fork` or `claude-desk` really runs (`--help` and `--dry-run` write nothing), it is created from [`config.example`](config.example), which lists every
-option with its default, commented out, so it changes nothing until you edit a line. A file that already
-exists is never changed, and plugin updates or a `git pull` never touch it.
+respected), as `KEY=value` lines with the keys below minus the `REMOTE_SESSIONS_` prefix. Environment
+variables with the full names work too.
 
-## Configuration
+You do not have to create it: the first time the plugin starts a session, or `claude-open`, `claude-fork`
+or `claude-desk` really runs (`--help` and `--dry-run` write nothing), it is created from
+[`config.example`](config.example), which lists every option with its default, commented out, so it
+changes nothing until you edit a line. A file that already exists is never changed.
 
-Environment variables, or the same keys without the `REMOTE_SESSIONS_` prefix in `~/.config/remote-sessions/config` (`KEY=value` lines).
-
-**Your settings survive updates.** The config file is outside the plugin folder, which Claude Code replaces on every plugin update, and outside the git clone that `install.sh` links to, so neither an update nor a `git pull` touches it. The plugin's `userConfig` (`/config` in Claude Code) could not carry these: it only reaches the plugin's hooks and MCP servers, while `claude-open` also runs from your shell, from scripts and from launchd jobs. `REMOTE_SESSIONS_CONFIG` points to another file.
+**Your settings survive updates.** The config file is outside the plugin folder, which Claude Code replaces on every plugin update, and outside the git clone that `install.sh` links to, so neither an update nor a `git pull` touches it. The plugin's `userConfig` (`/config` in Claude Code) could not carry these: it only reaches the plugin's hooks and MCP servers, while `claude-open` also runs from your shell, from scripts and from launchd jobs.
 
 | Variable | Default | What |
 |---|---|---|
@@ -148,7 +147,7 @@ The command typed into the new window runs under `/bin/sh` by default, so it wor
 ## Uninstall
 
 ```
-/plugin uninstall remote-sessions@remote-sessions
+/plugin uninstall remote-sessions@lucas-plugins
 ./install.sh --uninstall                     # removes only the links it created and the built helper
 ```
 
