@@ -1,7 +1,7 @@
 # remote-sessions settings: KEY=value lines, # starts a comment.
 # Every option is listed with its default and commented out, so this file changes nothing until you
 # remove the # in front of a line and edit its value. The environment variable REMOTE_SESSIONS_<KEY>
-# wins over the same key here. Details: README, "Configuration".
+# wins over the same key here. Details: README, "Settings".
 
 # Folder that holds your projects; lists and names are relative to it
 # ROOT=~/Projects

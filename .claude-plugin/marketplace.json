@@ -9,7 +9,7 @@
     {
       "name": "remote-sessions",
       "source": "./",
-      "description": "Open, resume and fork Claude Code sessions on your computer from the phone: a new terminal window per session, Remote Control on, picked from numbered project, folder and session lists."
+      "description": "Open, resume or fork Claude Code sessions on your computer from your phone."
     }
   ]
 }
