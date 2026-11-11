@@ -155,6 +155,30 @@ def status(sid):
     return out
 
 
+def ancestors(pid):
+    """This process's parent, grandparent, ... (pids)."""
+    out = []
+    while pid and pid > 1 and len(out) < 30:
+        r = subprocess.run(["ps", "-o", "ppid=", "-p", str(pid)], capture_output=True, text=True)
+        pid = int(r.stdout.strip() or 0)
+        out.append(pid)
+    return out
+
+
+def main_copy(cs, mine=None):
+    """The copy that counts when there are several: the one this command runs in, else the one with Remote
+    Control on, else the only one. The app restarts its own idle copy of a conversation when its entry is
+    on screen; that copy has no Remote Control and is not where the conversation lives."""
+    if len(cs) <= 1:
+        return cs[0] if cs else None
+    up = set(ancestors(os.getpid()) if mine is None else mine)
+    own = [c for c in cs if c["pid"] in up]
+    if own:
+        return own[0]
+    rc = [c for c in cs if c.get("remote_control")]
+    return rc[0] if len(rc) == 1 else None
+
+
 def target_for(places, asked):
     """Where to move: what --to says, else the other place from the one it runs in now."""
     if asked:
@@ -344,7 +368,8 @@ def main():
     if not rs.is_mac():
         raise rs.Fail("macOS only (it drives the Claude desktop app and terminal windows).")
     now = copies(sid)
-    places = {c["place"] for c in now}
+    main = main_copy(now)
+    places = {main["place"]} if main else {c["place"] for c in now}
     target = target_for(places, opt(a, "--to"))
     plan = f"move {sid} from the {', '.join(sorted(places)) or 'nowhere'} to the {target}"
     if "--dry-run" in a:

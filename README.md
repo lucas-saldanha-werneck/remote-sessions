@@ -166,6 +166,10 @@ separate; the result lists it under `archive`.
 
 `switch-app-terminal status` prints where each copy runs and whether its Remote Control is on.
 
+The desktop app starts its own idle copy of a conversation again whenever its entry is on screen. That copy
+has no Remote Control. When two copies run, the command takes the one it runs in (or, run from outside,
+the one with Remote Control on) as the place the conversation is now.
+
 ## Notes
 
 - A session that is already running is not opened again: Remote Control does not attach to a second copy. `--force` overrides.

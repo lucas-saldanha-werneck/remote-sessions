@@ -761,6 +761,15 @@ class TestSwitch(unittest.TestCase):
         with self.assertRaises(rs.Fail):
             self.m.target_for({"app"}, "phone")
 
+    def test_main_copy(self):
+        term = {"pid": 10, "place": "terminal", "remote_control": True}
+        app = {"pid": 20, "place": "app", "remote_control": False}   # the app's own idle restart
+        self.assertIsNone(self.m.main_copy([]))
+        self.assertEqual(self.m.main_copy([app]), app)
+        self.assertEqual(self.m.main_copy([term, app], mine=[99, 20, 1]), app)    # runs inside the app copy
+        self.assertEqual(self.m.main_copy([term, app], mine=[99, 98]), term)      # outside: the Remote Control one
+        self.assertIsNone(self.m.main_copy([dict(term, remote_control=False), app], mine=[99]))
+
     def test_rc_on_reads_the_pid_record(self):
         with tempfile.TemporaryDirectory() as d:
             write(os.path.join(d, "11.json"), json.dumps({"pid": 11, "bridgeSessionId": "session_01abc"}))
