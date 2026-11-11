@@ -15,9 +15,10 @@ background and returns at once, because the session must stop before it can reop
   3. reopens the same conversation: `claude-open <folder> --resume <id>` (a terminal window, or a
      detached tmux session with --tmux), or `claude-desk resume <id>` (the desktop app),
   4. checks: one copy runs, in the new place, and Remote Control is on (the copy's
-     ~/.claude/sessions/<pid>.json has a bridgeSessionId). In the app, a session just brought in may refuse
-     Remote Control until it has run a turn there: the worker waits up to 10 minutes (your first message
-     there, or the rc-auto plugin, turns it on), pressing the switch again each minute,
+     ~/.claude/sessions/<pid>.json has a bridgeSessionId). In the app, a session just brought in refuses
+     Remote Control until it has run a turn there: claude-desk sends it one short first turn, sets the
+     permission mode (APP_PERMISSION_MODE) and turns Remote Control on; the worker then still waits up to
+     10 minutes, running claude-desk again each minute,
   5. for 120 s after a move to the terminal, stops any idle copy the desktop app starts by itself
      (the app starts the session shown on screen again when its window gets focus),
   6. writes the result (`last`) and runs REMOTE_SESSIONS_NOTIFY with a one-line summary, if set.
@@ -295,7 +296,8 @@ def to_terminal(sid, folder, a, logf):
 
 def to_app(sid, logf):
     rc, out = run([sys.executable, os.path.join(BIN, "claude-desk"), "resume", sid], logf)
-    if rc != 0 and "imported into the app" not in out and "opened:" not in out:
+    # exit 3 = open in the app, Remote Control still off (waited for below)
+    if rc not in (0, 3) and "imported into the app" not in out and "opened:" not in out:
         return False, f"claude-desk failed: {out[-200:]}"
     c = wait_copy(sid, "app")
     if not c:

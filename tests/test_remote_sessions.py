@@ -818,5 +818,120 @@ class TestSwitch(unittest.TestCase):
         self.assertIn("no session", r.stderr)
 
 
+def load_desk():
+    """bin/claude-desk as a module (main() does not run)."""
+    import importlib.machinery, importlib.util
+    loader = importlib.machinery.SourceFileLoader("claude_desk", os.path.join(BIN, "claude-desk"))
+    spec = importlib.util.spec_from_loader(loader.name, loader)
+    mod = importlib.util.module_from_spec(spec)
+    loader.exec_module(mod)
+    return mod
+
+
+class TestDeskApp(unittest.TestCase):
+    """claude-desk inside the app: permission mode, the first turn, Remote Control. ax-press and the app log
+    are faked; nothing real is pressed."""
+
+    SID = "local_11111111-2222-3333-4444-555555555555"
+
+    @classmethod
+    def setUpClass(cls):
+        cls.m = load_desk()
+
+    def setUp(self):
+        self.log = ""
+        self.calls = []
+        self.ui = {"mode": "Manual", "rc": 0, "prompt": "", "turns": 0, "focused": True}
+        p = unittest.mock.patch
+        for name, fn in (("log_since", lambda pos: self.log), ("log_size", lambda: 0),
+                         ("ax", self.fake_ax), ("app_pid", lambda: "1"),
+                         ("wait_log", lambda pos, needle, t: needle in self.log)):
+            patcher = p.object(self.m, name, fn)
+            patcher.start()
+            self.addCleanup(patcher.stop)
+        sleeper = p.object(self.m.time, "sleep", lambda s: None)
+        sleeper.start()
+        self.addCleanup(sleeper.stop)
+        if self.ui["focused"]:
+            self.log += f"setFocusedSession: sessionId={self.SID}\n"
+
+    def fake_ax(self, axbin, role, title, *act):
+        self.calls.append((role, title) + act)
+        names = [t[:-1] if t.endswith("$") else t for t in title.split("|")]
+        if role == "AXPopUpButton":
+            if self.ui["mode"] not in names:
+                return 2, "NOT FOUND"
+            if act and act[0] == "pick":
+                self.ui["mode"] = act[1]
+                self.log += f"setPermissionMode: sessionId={self.SID}, mode=x\n"
+            return 0, f"found: {self.ui['mode']} value: nil"
+        if role == "AXCheckBox":
+            if act:
+                if self.ui["turns"] == 0:
+                    return 0, "press result: 0"          # ignored: no turn in the app yet
+                self.ui["rc"] = 1
+                self.log += f"toggleRemoteControl: sessionId={self.SID} enable=true\nRemote control enabled \"https://x/y\"\n"
+            return 0, f"found: Remote Control value: {self.ui['rc']}"
+        if role == "AXTextArea":
+            if act and act[0] == "set":
+                self.ui["prompt"] = act[1]
+            return 0, f"found: Prompt value: {self.ui['prompt'] or ' '}"
+        if role == "AXButton" and names == ["Send"]:
+            self.ui["turns"] += 1
+            self.ui["prompt"] = ""
+            self.log += f"sendMessage: sessionId={self.SID}\nQuery completed for session {self.SID}\n"
+            return 0, "press result: 0"
+        return 2, "NOT FOUND"
+
+    def test_wanted_mode(self):
+        self.assertEqual(self.m.wanted_mode(["--mode", "bypassPermissions"]), "Bypass permissions")
+        self.assertEqual(self.m.wanted_mode(["--mode", "accept edits"]), "Accept edits")
+        self.assertEqual(self.m.wanted_mode(["--mode", "default"]), "Manual")
+        self.assertIsNone(self.m.wanted_mode(["--mode", "plan", "--no-mode"]))
+        with unittest.mock.patch.dict(os.environ, {"REMOTE_SESSIONS_APP_PERMISSION_MODE": "Bypass permissions"}):
+            self.assertEqual(self.m.wanted_mode([]), "Bypass permissions")
+        with unittest.mock.patch.dict(os.environ, {"REMOTE_SESSIONS_APP_PERMISSION_MODE": ""}):
+            self.assertIsNone(self.m.wanted_mode([]))
+        with self.assertRaises(rs.Fail):
+            self.m.wanted_mode(["--mode", "yolo"])
+
+    def test_set_mode_picks_from_the_menu(self):
+        self.assertTrue(self.m.set_mode("ax", "Bypass permissions"))
+        self.assertEqual(self.ui["mode"], "Bypass permissions")
+        self.assertTrue(self.m.set_mode("ax", "Bypass permissions"))   # already: no second pick
+        self.assertEqual(sum(1 for c in self.calls if "pick" in c), 1)
+
+    def test_first_turn_then_remote_control(self):
+        self.m.rc_on("ax", self.SID, 0)
+        self.assertEqual(self.ui["turns"], 1)
+        self.assertEqual(self.ui["rc"], 1)
+
+    def test_no_turn_over_a_draft(self):
+        self.ui["prompt"] = "half-typed text"
+        with self.assertRaises(self.m.NoRC) as e:
+            self.m.rc_on("ax", self.SID, 0)
+        self.assertIn("draft", str(e.exception))
+        self.assertEqual(self.ui["prompt"], "half-typed text")
+        self.assertEqual(self.ui["turns"], 0)
+
+    def test_no_turn_when_another_session_is_shown(self):
+        self.log = "setFocusedSession: sessionId=local_other\n"
+        with self.assertRaises(self.m.NoRC):
+            self.m.rc_on("ax", self.SID, 0)
+        self.assertEqual(self.ui["turns"], 0)
+
+    def test_already_on_is_left_alone(self):
+        self.ui.update(rc=1, turns=1)
+        self.m.rc_on("ax", self.SID, 0)
+        self.assertFalse(any(c[0] == "AXCheckBox" and c[2:] for c in self.calls))
+
+    def test_no_rc_exits_3(self):
+        """NoRC is caught before the generic failure (exit 1) and exits 3."""
+        self.assertTrue(issubclass(self.m.NoRC, rs.Fail))
+        self.assertEqual(self.m.EXIT_NO_RC, 3)
+        src = open(os.path.join(BIN, "claude-desk"), encoding="utf-8").read()
+        self.assertLess(src.index("except NoRC"), src.index("except rs.Fail"))
+
+
 if __name__ == "__main__":
     unittest.main()

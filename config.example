@@ -51,3 +51,6 @@
 # DESKTOP_SESSIONS=~/Library/Application Support/Claude/claude-code-sessions
 # DESKTOP_LOG=~/Library/Logs/Claude/main.log
 # AX_PRESS=
+# Permission mode claude-desk sets in every session it opens in the app (empty: leave the app's choice).
+# One of: Auto, Manual, Accept edits, Plan, Bypass permissions
+# APP_PERMISSION_MODE=

@@ -13,12 +13,21 @@ macOS only.
                                        open a session by the id `claude-open --list` prints: the desktop
                                        session that holds it, or else import that terminal session into the
                                        app first. --dry-run says which, opens nothing
+  Every form also takes --mode <mode> (Auto, Manual, Accept edits, Plan, Bypass permissions; or the CLI
+  names bypassPermissions, acceptEdits, default, plan, auto) to set the session's permission mode, and
+  --no-mode to leave it. Without --mode, the APP_PERMISSION_MODE setting applies (empty: leave it).
+  Exit 0 = done; 3 = the session is open in the app, but Remote Control is off (the reason is printed);
+  1 = anything else.
 
 How it works (undocumented app internals; may change with app updates):
   1. `open claude://code/continue?session=local_<uuid>` focuses the session and starts its process.
   2. The `ax-press` helper presses the "Remote Control" switch of the session panel through the macOS
      Accessibility API (the terminal or Python running this needs Accessibility permission).
   3. The app log (~/Library/Logs/Claude/main.log) is read to confirm "Remote control enabled".
+  A session new to the app ignores the switch until it has run a turn there. Then claude-desk types one short
+  message into its prompt box (only when the box is empty and the app shows that session), presses Send,
+  waits for the reply and presses the switch again. The permission mode is picked in the same way, from the
+  mode menu under the prompt box.
 `new`: `claude -p --session-id <uuid>` creates the session in the folder; the deep link
 `claude://resume?session=<uuid>` imports it into the app as local_<uuid>. `resume` uses the same deep link
 for a terminal session the app does not hold yet.
@@ -28,7 +37,7 @@ The app must be open and the Mac unlocked.
 Settings: REMOTE_SESSIONS_AX_PRESS (helper path), REMOTE_SESSIONS_DESKTOP_SESSIONS (app session folder),
 REMOTE_SESSIONS_DESKTOP_LOG (app log), plus the common ones (projects root, claude command).
 """
-import glob, json, os, shlex, shutil, subprocess, sys, time, uuid
+import glob, hashlib, json, os, shlex, shutil, subprocess, sys, time, uuid
 
 REPO = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
 sys.path.insert(0, os.path.join(REPO, "lib"))
@@ -46,18 +55,32 @@ def ax_press():
         p = rs.expand(p)
         return p if os.access(p, os.X_OK) else None
     built = os.path.join(DATA, "remote-sessions", "ax-press")
-    if os.access(built, os.X_OK):
+    src = os.path.join(REPO, "tools", "ax-press.swift")
+    stamp = built + ".src-sha256"
+    try:
+        with open(src, "rb") as fh:
+            sha = hashlib.sha256(fh.read()).hexdigest()
+    except OSError:
+        sha = ""
+    try:
+        with open(stamp, encoding="utf-8") as fh:
+            current = fh.read().strip() == sha
+    except OSError:
+        current = False
+    if os.access(built, os.X_OK) and (current or not sha):
         return built
     swiftc = shutil.which("swiftc")
-    src = os.path.join(REPO, "tools", "ax-press.swift")
-    if not (rs.is_mac() and swiftc and os.path.exists(src)):
-        return None
+    if not (rs.is_mac() and swiftc and sha):
+        return built if os.access(built, os.X_OK) else None
     os.makedirs(os.path.dirname(built), exist_ok=True)
-    print("building ax-press (once)...")
-    r = subprocess.run([swiftc, "-O", "-o", built, src], capture_output=True, text=True)
+    print("building ax-press (once per version)...")
+    r = subprocess.run([swiftc, "-O", "-o", built + ".new", src], capture_output=True, text=True)
     if r.returncode != 0:
         print(f"could not build ax-press: {(r.stderr or r.stdout)[-300:]}")
-        return None
+        return built if os.access(built, os.X_OK) else None
+    os.replace(built + ".new", built)
+    with open(stamp, "w", encoding="utf-8") as fh:
+        fh.write(sha + "\n")
     return built
 
 
@@ -137,40 +160,146 @@ def app_pid():
     return None
 
 
-def press(ax, check_only=False):
-    pid = app_pid()
-    if not pid:
-        raise rs.Fail("the Claude desktop app is not running")
-    r = subprocess.run([ax, pid, "AXCheckBox", "Remote Control"] + ([] if check_only else ["press"]),
-                       capture_output=True, text=True)
-    return r.returncode, r.stdout.strip()
-
-
 def open_url(url):
     subprocess.run([shutil.which("open") or "/usr/bin/open", url], check=True)
 
 
-def rc_on(sid, pos):
-    ax = ax_press()
-    if not ax:
-        print("Remote Control not turned on: the ax-press helper is missing (it needs the Swift compiler: "
-              "xcode-select --install). Turn it on with the Remote Control switch in the session panel.")
+MODES = ("Auto", "Manual", "Accept edits", "Plan", "Bypass permissions")  # the app's permission mode menu
+MODE_ALIASES = {"bypasspermissions": "Bypass permissions", "bypass": "Bypass permissions", "default": "Manual",
+                "acceptedits": "Accept edits", "plan": "Plan", "auto": "Auto", "manual": "Manual"}
+FIRST_TURN = ("claude-desk opened this session in the desktop app and needs one turn here to turn Remote Control "
+              "on. Do not do any task. Reply only: ready.")
+EXIT_NO_RC = 3  # the session is open in the app, but Remote Control is off
+
+
+class NoRC(rs.Fail):
+    """The session opened, but Remote Control could not be turned on (exit 3, not 1)."""
+
+
+def ax(axbin, *args):
+    pid = app_pid()
+    if not pid:
+        raise rs.Fail("the Claude desktop app is not running")
+    r = subprocess.run([axbin, pid] + list(args), capture_output=True, text=True, timeout=90)
+    return r.returncode, r.stdout.strip()
+
+
+def press(axbin, check_only=False):
+    return ax(axbin, "AXCheckBox", "Remote Control$", *([] if check_only else ["press"]))
+
+
+def opt(a, name):
+    return a[a.index(name) + 1] if name in a and a.index(name) + 1 < len(a) else None
+
+
+def wanted_mode(a):
+    """The permission mode to set in the app: --mode, else the APP_PERMISSION_MODE setting; None = leave it."""
+    if "--no-mode" in a:
+        return None
+    m = (opt(a, "--mode") or rs.setting("APP_PERMISSION_MODE", "") or "").strip()
+    if not m:
+        return None
+    key = m.lower().replace(" ", "").replace("-", "").replace("_", "")
+    for x in MODES:
+        if key == x.lower().replace(" ", ""):
+            return x
+    if key in MODE_ALIASES:
+        return MODE_ALIASES[key]
+    raise rs.Fail(f"unknown permission mode {m!r}; use one of: {', '.join(MODES)}")
+
+
+def set_mode(axbin, mode):
+    """Pick `mode` in the session's permission menu (the pop-up button named after the current mode)."""
+    if ax(axbin, "AXPopUpButton", mode + "$")[0] == 0:
+        print(f"permission mode: {mode} (already)")
+        return True
+    others = "|".join(x + "$" for x in MODES if x != mode)
+    code, out = ax(axbin, "AXPopUpButton", others, "pick", mode)
+    if code == 0 and mode == "Bypass permissions" and ax(axbin, "AXHeading", "Bypass all permissions?$")[0] == 0:
+        # first time in this folder: the app asks once ("You won't be asked again for this workspace")
+        code, out = ax(axbin, "AXButton", "Bypass permissions$", "press")
+        print("confirmed the app's 'Bypass all permissions?' question for this folder")
+    if code == 0 and ax(axbin, "AXPopUpButton", mode + "$")[0] == 0:
+        print(f"permission mode: {mode}")
+        return True
+    print(f"permission mode NOT set to {mode}: {out[-200:] or 'the menu did not change'}")
+    return False
+
+
+def focused(sid, pos):
+    lines = [x for x in log_since(max(0, pos - 2_000_000)).splitlines() if "setFocusedSession: sessionId=" in x]
+    return bool(lines) and lines[-1].endswith(sid)
+
+
+def first_turn(axbin, sid, pos):
+    """Send one short message through the session's prompt box, so the app lets Remote Control on.
+    Only when the app shows this session and its prompt box is empty (never over a draft).
+    Returns None when sent, else why not."""
+    if not focused(sid, pos):
+        return "the app does not show this session"
+    code, out = ax(axbin, "AXTextArea", "Prompt$")
+    if code != 0:
+        return "prompt box not found"
+    draft = out.split("value:", 1)[1].strip() if "value:" in out else ""
+    if draft and draft != "nil":
+        return "the prompt box holds a draft; not touched"
+    p = log_size()
+    code, out = ax(axbin, "AXTextArea", "Prompt$", "set", FIRST_TURN)
+    if code != 0:
+        return f"could not type into the prompt box: {out[-150:]}"
+    code, out = ax(axbin, "AXButton", "Send$", "press")
+    if code != 0:
+        return f"Send button not found: {out[-150:]}"
+    if not wait_log(p, f"sendMessage: sessionId={sid}", 15):
+        return "the app log shows no message sent"
+    print("first turn sent")
+    wait_log(p, f"Query completed for session {sid}", 180)
+    return None
+
+
+def prepare(sid, pos, a):
+    """After the app opened `sid`: set the permission mode, then turn Remote Control on (unless --no-rc)."""
+    mode = wanted_mode(a)
+    if not mode and "--no-rc" in a:
+        return
+    axbin = ax_press()
+    if not axbin:
+        print("Permission mode and Remote Control not set: the ax-press helper is missing (it needs the Swift "
+              "compiler: xcode-select --install). Set them in the session panel.")
+        if "--no-rc" not in a:
+            raise NoRC("ax-press is missing")
         return
     wait_log(pos, f"Session {sid} warmed", 30)
     time.sleep(1.5)
-    code, out = press(ax, check_only=True)  # AXValue 1 = already on: leave it
+    if mode:
+        set_mode(axbin, mode)
+    if "--no-rc" not in a:
+        rc_on(axbin, sid, pos)
+
+
+def rc_on(axbin, sid, pos):
+    code, out = press(axbin, check_only=True)  # AXValue 1 = already on: leave it
     if out.endswith("value: 1"):
         print("Remote Control was already on (not touched)")
         return
     pos2 = log_size()
-    code, out = press(ax)
+    code, out = press(axbin)
     if code != 0:
-        raise rs.Fail(f"Remote Control switch not found on screen: {out}. A locked screen hides it. If this runs "
-                      f"inside a desktop app session, turn it on from there or in the panel.")
+        raise NoRC(f"Remote Control switch not found on screen: {out}. A locked screen hides it. If this runs "
+                   f"inside a desktop app session, turn it on from there or in the panel.")
     if not wait_log(pos2, f"toggleRemoteControl: sessionId={sid}", 10):
-        raise rs.Fail(f"pressed, but the app log shows no toggle for this session: {out}")
+        # A session new to the app ignores the switch until it has run a turn there.
+        print("the app ignored the Remote Control switch (no turn here yet): sending a first turn")
+        why = first_turn(axbin, sid, pos)
+        if why:
+            raise NoRC(f"the app ignored the Remote Control switch, and no first turn was sent ({why}). "
+                       f"Send one message in the session, then turn Remote Control on.")
+        pos2 = log_size()
+        code, out = press(axbin)
+        if code != 0 or not wait_log(pos2, f"toggleRemoteControl: sessionId={sid}", 10):
+            raise NoRC(f"pressed after the first turn, but the app log shows no toggle for this session: {out}")
     if f"sessionId={sid} enable=false" in log_since(pos2):
-        press(ax)  # it was on: undo the switch-off
+        press(axbin)  # it was on: undo the switch-off
         print("Remote Control was already on (kept)")
         return
     for attempt in (1, 2):
@@ -188,8 +317,8 @@ def rc_on(sid, pos):
         if attempt == 1:
             print("Remote Control did not connect (app timeout); trying again")
             pos2 = log_size()
-            press(ax)
-    raise rs.Fail(f"Remote Control did not connect in 2 attempts (see {LOG}: 'Failed to toggle remote control')")
+            press(axbin)
+    raise NoRC(f"Remote Control did not connect in 2 attempts (see {LOG}: 'Failed to toggle remote control')")
 
 
 def new_session(a):
@@ -214,8 +343,7 @@ def new_session(a):
     if not wait_log(pos, f"as Desktop session {sid}", 30):
         raise rs.Fail(f"the app did not import {cli} in 30 s (see {LOG}: 'Resume deep link')")
     print(f"imported into the app: {sid}")
-    if "--no-rc" not in a:
-        rc_on(sid, pos)
+    prepare(sid, pos, a)
 
 
 def find_cli(cli):
@@ -235,8 +363,7 @@ def open_session(d, a):
         if not (focus and focus[-1].endswith(sid)):  # already focused: the app does not log it again
             raise rs.Fail(f"the app did not focus {sid} in 15 s (see {LOG})")
     print(f"opened: {d.get('title', '')} ({sid})")
-    if "--no-rc" not in a:
-        rc_on(sid, pos)
+    prepare(sid, pos, a)
 
 
 def resume(a):
@@ -262,8 +389,7 @@ def resume(a):
     line = [x for x in log_since(pos).splitlines() if needle in x][-1]
     sid = line.split(needle, 1)[1].strip()
     print(f"imported into the app: {sid}")
-    if "--no-rc" not in a:
-        rc_on(sid, pos)
+    prepare(sid, pos, a)
 
 
 def main():
@@ -293,5 +419,8 @@ def main():
 if __name__ == "__main__":
     try:
         main()
+    except NoRC as e:
+        print(f"claude-desk: the session is open in the app, but Remote Control is off: {e}", file=sys.stderr)
+        sys.exit(EXIT_NO_RC)
     except rs.Fail as e:
         sys.exit(f"claude-desk: {e}")

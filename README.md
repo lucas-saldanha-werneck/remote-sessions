@@ -134,13 +134,13 @@ The command typed into the new window runs under `/bin/sh` by default, so it wor
 | iTerm | new windows on macOS | Terminal.app is used |
 | tmux | `--tmux`; forks get their own tmux session | `--tmux` is refused with a message; on macOS forks run directly in a new window |
 | `claude agents --json` (recent Claude Code) | marking sessions as already open; refusing to open a second copy | every session shows as not open |
-| Swift compiler (`xcode-select --install`) | builds `ax-press`, which flips the Remote Control switch for `claude-desk` | `claude-desk` opens the session; you turn Remote Control on in its panel |
+| Swift compiler (`xcode-select --install`) | builds `ax-press`, which flips the Remote Control switch, picks the permission mode (`--mode`, or the `APP_PERMISSION_MODE` setting) and, for a session new to the app, sends one short first turn so the app lets Remote Control on | `claude-desk` opens the session; you set the mode and Remote Control in its panel |
 | Accessibility permission for your terminal/Python | `ax-press` | as above |
 
 ## Platform
 
 - `claude-open` and `claude-fork`: macOS (iTerm, Terminal.app or tmux) and Linux (tmux). Listing (`--projects`, `--list`) works everywhere, Windows included; opening windows on Windows is not supported.
-- `claude-desk` and `switch-app-terminal`: macOS only. It relies on undocumented Claude desktop app internals (the `claude://` deep links, log lines in `~/Library/Logs/Claude/main.log`, and the accessibility label of the Remote Control switch), so an app update can break it.
+- `claude-desk` and `switch-app-terminal`: macOS only. It relies on undocumented Claude desktop app internals (the `claude://` deep links, log lines in `~/Library/Logs/Claude/main.log`, and the accessibility labels of the Remote Control switch, the permission mode menu, the prompt box and the Send button), so an app update can break it. `claude-desk` exits 3 when the session opened but Remote Control stayed off.
 
 ## Moving a session between the app and the terminal
 
