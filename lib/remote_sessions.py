@@ -326,7 +326,7 @@ def resolve(root, query, create=False, dry_run=False):
         real, real_root = os.path.realpath(full), os.path.realpath(root)
         if real != real_root and not real.startswith(real_root + os.sep):
             raise Fail(f"'{query.strip()}' is outside the projects root ({root}). Give a folder under it.")
-        query = os.path.relpath(real, real_root)  # "." for the root itself
+        query = os.path.relpath(real, real_root).replace(os.sep, "/")  # "." for the root itself; "/" as everywhere here
     query = query.strip().strip("/\\")
     if query in (".", ""):
         return "."
