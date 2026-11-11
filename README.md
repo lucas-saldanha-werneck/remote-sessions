@@ -144,7 +144,7 @@ The command typed into the new window runs under `/bin/sh` by default, so it wor
 
 ## Moving a session between the app and the terminal
 
-`switch-app-terminal` run inside a session moves that session to the other place: from the desktop app to
+`/switch-app-terminal` (or the shell command `switch-app-terminal`) run inside a session moves that session to the other place: from the desktop app to
 a terminal window (iTerm, Terminal.app, or a detached tmux session with `--tmux`), or from a terminal to
 the app. It returns at once and leaves a worker in the background, because the session has to stop before
 it can reopen. The worker:
