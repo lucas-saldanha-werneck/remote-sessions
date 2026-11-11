@@ -47,7 +47,7 @@ switch-app-terminal last                     # the result of that move
 In Claude Code:
 
 ```
-/plugin marketplace add lucas-saldanha-werneck/claude-plugins
+/plugin marketplace add lucas-saldanha-werneck/lucas-tools
 /plugin install remote-sessions@lucas-tools
 ```
 
