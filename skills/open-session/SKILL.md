@@ -1,14 +1,19 @@
 ---
 name: open-session
-description: Open or resume a Claude Code session of another project folder on this computer, in a new terminal window with Remote Control on, picking project, folder and session from numbered lists. Built for use from the phone through Remote Control, where only already-open sessions show up and /resume does not work. Use when the user says "/open-session", "open the project X", "open a session in X", "resume the X session", "continue that conversation in X", or asks to open or resume Claude in a folder that has no open session.
-argument-hint: "[folder] [last|id]"
+description: Open or resume a Claude Code session of another project folder on this computer, in a new terminal window or in the Claude desktop app, with Remote Control on, picking project, folder and session from numbered lists. Built for use from the phone through Remote Control, where only already-open sessions show up and /resume does not work. Use when the user says "/open-session", "open the project X", "open a session in X", "resume the X session", "continue that conversation in X", or asks to open or resume Claude in a folder that has no open session.
+argument-hint: "[folder] [last|id] [app|terminal]"
 ---
 
 # open-session: open or resume a session in another folder
 
-Why: in the Claude mobile app, Remote Control only lists sessions that are already running, and `/resume` is not available there. This skill runs from any open session and starts, on this computer, a new terminal window (iTerm, Terminal.app, or a detached tmux session) with the chosen session and Remote Control on, so it appears in the app's Code tab. The permission mode is whatever the user's settings say.
+Why: in the Claude mobile app, Remote Control only lists sessions that are already running, and `/resume` is not available there. This skill runs from any open session and starts, on this computer, the chosen session with Remote Control on, so it appears in the app's Code tab. It opens either in a new terminal window (iTerm, Terminal.app, or a detached tmux session) or in the Claude desktop app (macOS). The permission mode is whatever the user's settings say.
 
-Everything goes through `claude-open`. It prints JSON; never read `~/.claude/projects/` by hand.
+Finding folders and sessions goes through `claude-open`. It prints JSON; never read `~/.claude/projects/` by hand. Opening in the desktop app goes through `claude-desk`:
+
+| Command | What it does |
+|---|---|
+| `claude-desk resume <id>` | opens the session in the desktop app: the app session that holds that id, or else it imports the terminal session into the app first. Then it turns Remote Control on. `--dry-run` only says which |
+| `claude-desk new <folder>` | starts a new session in the desktop app in that folder (creates the folder if missing) and turns Remote Control on |
 
 | Command | What it does |
 |---|---|
@@ -42,7 +47,7 @@ client — reply with a number:
 - Children are numbered from 1, in the order `claude-open` returned them (most recent first). Show all of them.
 - `▸` = has subfolders with sessions (`subfolders` > 0): choosing it **goes down one level** (new list). Without `▸`, choosing it goes to the session list.
 - An item with `sessions: 0` shows only "▸ · last <date>" (it is only a path).
-- **The last number of every folder list is `+ new folder here`** (at the top it creates directly in the root). If chosen: ask only "Name of the new folder?", end your turn, and with the answer run `claude-open <current-folder> --new "<name>"` (no step 3: a new folder has no old session). Use the name as typed; if `claude-open` refuses (already exists etc.), show the message and ask again.
+- **The last number of every folder list is `+ new folder here`** (at the top it creates directly in the root). If chosen: ask only "Name of the new folder?", end your turn, and with the answer go to step 4 (where) and open it there: `claude-open <current-folder> --new "<name>"` or `claude-desk new <current-folder>/<name>` (no step 3: a new folder has no old session). Use the name as typed; if `claude-open` refuses (already exists etc.), show the message and ask again.
 
 The list shows only folders that **have Claude Code conversations** in them or below. Folders with only documents do not appear; `claude -p` / Agent SDK runs do not count; git worktrees and folders that no longer exist are left out.
 
@@ -57,12 +62,21 @@ The list shows only folders that **have Claude Code conversations** in them or b
    2. <title> · <when> · already open
    ```
    "already open" when `open: true`. If the user asks for "more", run with a larger N and keep the numbering.
-4. **Open.**
-   - Session with `open: true`: **do not open it again.** Say it is already in the app's Code tab under that title. Use `--force` only if the user insists (Remote Control does not attach to the second copy).
-   - Otherwise: `claude-open <folder> --resume <id>` (or `claude-open <folder>` for a new one; `--new "<name>"` for a new folder).
-   - A brand-new folder may show the "trust this folder?" prompt in the new window, unless a parent folder is already trusted. If it does, the session waits there until someone answers on the computer.
-5. **Check, do not trust "window opened".** Wait about 10 seconds (a polling loop with a deadline, not a bare sleep) and run `claude agents --json`: there must be an `interactive` entry with that `sessionId` and a `pid`. If it does not show up, say it did not start and paste what `claude-open` printed. If `claude agents` is not available in this Claude Code version, say you could not confirm it.
-6. **Answer briefly:** which folder, which session (title), whether it started, and "open it from the app's Code tab, name: <title>".
+4. **Where.** Session with `open: true`: **do not open it again** (in either place). Say it is already in the app's Code tab under that title. Use `--force` only if the user insists (Remote Control does not attach to the second copy). Otherwise ask, as a numbered list, and end your turn:
+
+   ```
+   Open where? Reply with a number:
+   1. desktop app
+   2. terminal
+   ```
+   Skip the question when the request already said it ("in the app", "in the terminal", `/open-session inventory last app`), and when `claude-desk` is missing or this is not macOS (then it is the terminal; say so in one line).
+5. **Open.**
+   - Terminal: `claude-open <folder> --resume <id>` (or `claude-open <folder>` for a new one; `--new "<name>"` for a new folder). A brand-new folder may show the "trust this folder?" prompt in the new window, unless a parent folder is already trusted. If it does, the session waits there until someone answers on the computer.
+   - Desktop app: `claude-desk resume <id>` (or `claude-desk new <folder>` for a new one; for a new folder, `claude-desk new <folder>/<name>` with the same name rules as `--new`). The app must be running and the computer unlocked; the app comes to the front on the computer. A new session gets a short first turn (`claude -p`), which takes a few seconds.
+6. **Check, do not trust "window opened".**
+   - Terminal: wait about 10 seconds (a polling loop with a deadline, not a bare sleep) and run `claude agents --json`: there must be an `interactive` entry with that `sessionId` and a `pid`. If it does not show up, say it did not start and paste what `claude-open` printed. If `claude agents` is not available in this Claude Code version, say you could not confirm it.
+   - Desktop app: `claude-desk` prints `opened:` or `imported into the app:` with the app session id (`local_…`), then `Remote Control on:`. Opening works with the screen locked, but the Remote Control switch is then hidden ("switch not found"). If the Remote Control step failed and you have a tool that turns Remote Control on for a desktop session (`set_remote_control` in the app's session tools), call it with that `local_…` id and report the state it returns. Otherwise tell the user to turn on the Remote Control switch in that session's panel. The app session starts its process only when it gets a message, so "not running" right after opening is normal.
+7. **Answer briefly:** which folder, which session (title), where it opened, whether Remote Control is on, and "open it from the app's Code tab, name: <title>".
 
 ## Pitfalls
 
