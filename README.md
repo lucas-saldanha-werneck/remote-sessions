@@ -7,6 +7,7 @@ In the mobile app, Remote Control only lists sessions that are already running, 
 - **`open-session` skill + `claude-open`**: pick project, folder and session from short numbered lists (made for a phone screen), then open a new or a past session in a new window, or (macOS) in the Claude desktop app. It asks which each time.
 - **`fork-session` skill + `claude-fork`**: fork the current session into an independent copy, in its own window, with Remote Control on.
 - **`claude-desk`** (macOS): reopen a Claude desktop app session, or bring a terminal session into the app, and switch its Remote Control on.
+- **`switch-app-terminal`** (macOS): move the conversation you are in from the desktop app to a terminal window, or back, and check that it moved and that Remote Control is on.
 
 ## Example
 
@@ -37,6 +38,8 @@ claude-open notes --tmux --teams --prompt "/plan"   # agent teams on for this se
 claude-fork --name "try another way"         # inside a session: fork it
 claude-desk --list                           # macOS: desktop app sessions
 claude-desk resume <id>                      # macOS: open a session (from claude-open --list) in the desktop app
+switch-app-terminal                          # macOS, inside a session: move it to the other place
+switch-app-terminal last                     # the result of that move
 ```
 
 ## Install
@@ -48,7 +51,7 @@ In Claude Code:
 /plugin install remote-sessions@lucas-tools
 ```
 
-The plugin puts `claude-open`, `claude-fork` and `claude-desk` on Claude's PATH. To use them in your own terminal too:
+The plugin puts `claude-open`, `claude-fork`, `claude-desk` and `switch-app-terminal` on Claude's PATH. To use them in your own terminal too:
 
 ```
 git clone https://github.com/lucas-saldanha-werneck/remote-sessions
@@ -137,7 +140,31 @@ The command typed into the new window runs under `/bin/sh` by default, so it wor
 ## Platform
 
 - `claude-open` and `claude-fork`: macOS (iTerm, Terminal.app or tmux) and Linux (tmux). Listing (`--projects`, `--list`) works everywhere, Windows included; opening windows on Windows is not supported.
-- `claude-desk`: macOS only. It relies on undocumented Claude desktop app internals (the `claude://` deep links, log lines in `~/Library/Logs/Claude/main.log`, and the accessibility label of the Remote Control switch), so an app update can break it.
+- `claude-desk` and `switch-app-terminal`: macOS only. It relies on undocumented Claude desktop app internals (the `claude://` deep links, log lines in `~/Library/Logs/Claude/main.log`, and the accessibility label of the Remote Control switch), so an app update can break it.
+
+## Moving a session between the app and the terminal
+
+`switch-app-terminal` run inside a session moves that session to the other place: from the desktop app to
+a terminal window (iTerm, Terminal.app, or a detached tmux session with `--tmux`), or from a terminal to
+the app. It returns at once and leaves a worker in the background, because the session has to stop before
+it can reopen. The worker:
+
+1. waits until the session is idle, then stops it (and the tmux session it ran in);
+2. reopens the same conversation with `claude-open --resume` or `claude-desk resume`;
+3. checks that one copy runs, in the new place, with Remote Control on. Claude Code writes each running
+   session to `~/.claude/sessions/<pid>.json`; a `bridgeSessionId` there means Remote Control is on;
+4. after a move to the terminal, stops for 2 minutes any copy the desktop app starts again by itself
+   (the app restarts the session shown on screen when its window gets focus);
+5. writes the result, which `switch-app-terminal last` prints, and runs `REMOTE_SESSIONS_NOTIFY` with
+   a one-line summary, if you set one.
+
+After a move to the terminal the conversation keeps its entry in the desktop app. When that entry's
+`bridgeSessionIds` holds the terminal's Remote Control session, it is the same conversation seen through
+Remote Control, and it stays: archiving it disconnects Remote Control in the terminal too ("ended or
+archived from another device or app", code 4090). Any other app session of that conversation is
+separate; the result lists it under `archive`.
+
+`switch-app-terminal status` prints where each copy runs and whether its Remote Control is on.
 
 ## Notes
 

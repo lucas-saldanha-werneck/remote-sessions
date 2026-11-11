@@ -726,5 +726,88 @@ class SeedConfig(Base):
         self.assertGreater(len(outs[0][0][1]), 15)   # every key of the starter was checked
 
 
+def load_switch():
+    """bin/switch-app-terminal has no .py suffix: load it as a module (main() does not run)."""
+    import importlib.machinery, importlib.util
+    path = os.path.join(BIN, "switch-app-terminal")
+    loader = importlib.machinery.SourceFileLoader("switch_app_terminal", path)
+    spec = importlib.util.spec_from_loader(loader.name, loader)
+    mod = importlib.util.module_from_spec(spec)
+    loader.exec_module(mod)
+    return mod
+
+
+class TestSwitch(unittest.TestCase):
+    """switch-app-terminal: where a copy runs, which way to move, Remote Control, and the app record."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.m = load_switch()
+
+    def test_place_of(self):
+        app = ("/Users/x/Library/Application Support/Claude/claude-code/2.1/abc/claude.app/Contents/MacOS/claude "
+               "--output-format stream-json --verbose")
+        self.assertEqual(self.m.place_of("??", app), "app")
+        self.assertEqual(self.m.place_of("ttys010", "/usr/local/bin/claude --resume x --remote-control"), "terminal")
+        self.assertEqual(self.m.place_of("??", "/usr/local/bin/claude -p hi"), "other")
+
+    def test_target_for(self):
+        self.assertEqual(self.m.target_for({"app"}, None), "terminal")
+        self.assertEqual(self.m.target_for({"terminal"}, None), "app")
+        self.assertEqual(self.m.target_for({"terminal"}, "terminal"), "terminal")
+        for places in (set(), {"app", "terminal"}):
+            with self.assertRaises(rs.Fail):
+                self.m.target_for(places, None)
+        with self.assertRaises(rs.Fail):
+            self.m.target_for({"app"}, "phone")
+
+    def test_rc_on_reads_the_pid_record(self):
+        with tempfile.TemporaryDirectory() as d:
+            write(os.path.join(d, "11.json"), json.dumps({"pid": 11, "bridgeSessionId": "session_01abc"}))
+            write(os.path.join(d, "12.json"), json.dumps({"pid": 12, "bridgeSessionId": None}))
+            with unittest.mock.patch.object(self.m, "SESSIONS", d):
+                self.assertTrue(self.m.rc_on(11))
+                self.assertFalse(self.m.rc_on(12))
+                self.assertFalse(self.m.rc_on(13))  # no record
+
+    def test_app_verdict(self):
+        row = {"sessionId": "local_a", "isArchived": False, "bridgeSessionIds": ["session_01x", "session_01y"]}
+        self.assertEqual(self.m.app_verdict(row, "session_01y"), "view")       # shares Remote Control: keep
+        self.assertEqual(self.m.app_verdict(row, "session_01z"), "separate")   # its own session: archive
+        self.assertEqual(self.m.app_verdict(row, None), "separate")
+        self.assertIsNone(self.m.app_verdict(dict(row, isArchived=True), "session_01y"))
+        self.assertIsNone(self.m.app_verdict(None, "session_01y"))
+
+    def test_app_row_matches_the_cli_session(self):
+        with tempfile.TemporaryDirectory() as d:
+            write(os.path.join(d, "acct", "org", "local_aaa.json"),
+                  json.dumps({"sessionId": "local_aaa", "cliSessionId": "1111-cli"}))
+            write(os.path.join(d, "acct", "org", "local_bbb.json"), "not json")
+            with unittest.mock.patch.object(self.m, "DESK", d):
+                self.assertEqual(self.m.app_row("1111-cli")["sessionId"], "local_aaa")
+                self.assertIsNone(self.m.app_row("2222-cli"))
+
+    def test_copies_skips_other_sessions_and_dead_pids(self):
+        live = [{"sessionId": "s1", "pid": 1, "status": "idle", "cwd": "/p"},
+                {"sessionId": "s2", "pid": 2, "status": "busy", "cwd": "/q"},
+                {"sessionId": "s1", "pid": 3, "status": "idle", "cwd": "/p"}]
+        procs = {1: ("ttys001", "claude --resume s1"), 3: None}
+        with unittest.mock.patch.object(self.m, "proc", lambda pid: procs.get(pid)), \
+                unittest.mock.patch.object(self.m, "rc_on", lambda pid: True):
+            out = self.m.copies("s1", live)
+        self.assertEqual([(c["pid"], c["place"], c["remote_control"]) for c in out], [(1, "terminal", True)])
+
+    def test_help_and_no_session(self):
+        r = subprocess.run([PY, os.path.join(BIN, "switch-app-terminal"), "--help"], capture_output=True, text=True)
+        self.assertEqual(r.returncode, 0)
+        self.assertIn("bridgeSessionIds", r.stdout)
+        env = dict(os.environ)
+        env.pop("CLAUDE_CODE_SESSION_ID", None)
+        r = subprocess.run([PY, os.path.join(BIN, "switch-app-terminal"), "status"], capture_output=True, text=True,
+                           env=env)
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("no session", r.stderr)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -1,0 +1,369 @@
+#!/usr/bin/env python3
+"""switch-app-terminal: move a Claude Code conversation between the Claude desktop app and a terminal
+window, keep Remote Control on, and check that it really moved. macOS only.
+
+  switch-app-terminal                 move the conversation this runs in to the other place
+  switch-app-terminal --to app|terminal [--session <id>] [--tmux] [--hello] [--wait S] [--dry-run]
+  switch-app-terminal status [--session <id>]      JSON: where each copy runs, and Remote Control
+  switch-app-terminal last [--session <id>]        the result of the last move (JSON)
+
+Run from inside a session it moves that session (CLAUDE_CODE_SESSION_ID). It starts a worker in the
+background and returns at once, because the session must stop before it can reopen elsewhere:
+
+  1. the worker waits until the session is idle (3 checks in a row, 5 s apart; --wait, default 900 s),
+  2. stops its process (in a terminal, also the tmux session it ran in),
+  3. reopens the same conversation: `claude-open <folder> --resume <id>` (a terminal window, or a
+     detached tmux session with --tmux), or `claude-desk resume <id>` (the desktop app),
+  4. checks: one copy runs, in the new place, and Remote Control is on (the copy's
+     ~/.claude/sessions/<pid>.json has a bridgeSessionId),
+  5. for 120 s after a move to the terminal, stops any idle copy the desktop app starts by itself
+     (the app starts the session shown on screen again when its window gets focus),
+  6. writes the result (`last`) and runs REMOTE_SESSIONS_NOTIFY with a one-line summary, if set.
+
+After a move to the terminal, the app's record of the conversation is checked:
+  - its bridgeSessionIds holds the terminal's Remote Control session: it is the same conversation seen
+    through Remote Control. It is kept. Archiving it would disconnect Remote Control in the terminal too
+    ("ended or archived from another device or app", code 4090).
+  - it does not: it is a separate app session. The result names it under "archive", and the session that
+    ran the command archives it (from an app session: archive_session <id>).
+
+--hello types one line into the moved terminal session, so it answers and you see it on the phone.
+Settings: REMOTE_SESSIONS_NOTIFY (a command; the summary is its last argument), plus the claude-open and
+claude-desk ones.
+"""
+import glob, json, os, shlex, subprocess, sys, time
+
+REPO = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
+sys.path.insert(0, os.path.join(REPO, "lib"))
+import remote_sessions as rs  # noqa: E402
+
+BIN = os.path.join(REPO, "bin")
+STATE = rs.expand(os.path.join(os.environ.get("XDG_STATE_HOME") or "~/.local/state", "remote-sessions"))
+DESK = rs.expand(rs.setting("DESKTOP_SESSIONS", "~/Library/Application Support/Claude/claude-code-sessions"))
+RC_LINE = "remote-control is active"
+SESSIONS = rs.expand(os.path.join(rs.claude_dir(), "sessions"))
+IDLE_CHECKS = 3
+POLL = float(os.environ.get("REMOTE_SESSIONS_SWITCH_POLL", "5"))
+ARCHIVE = []  # separate app sessions the caller must archive
+GUARD_S = float(os.environ.get("REMOTE_SESSIONS_SWITCH_GUARD", "120"))
+
+
+# ---------- where does a session run ----------
+
+def agents():
+    """Live sessions on this machine: [{pid, sessionId, status, cwd, name}] (claude agents --json)."""
+    try:
+        r = subprocess.run(shlex.split(rs.claude_cmd()) + ["agents", "--json"], capture_output=True, text=True,
+                           stdin=subprocess.DEVNULL, timeout=30)
+        return json.loads(r.stdout or "[]")
+    except Exception:
+        return []
+
+
+def proc(pid):
+    """(tty, command) of a live process, or None."""
+    r = subprocess.run(["ps", "-o", "tty=,command=", "-p", str(pid)], capture_output=True, text=True)
+    line = r.stdout.strip()
+    if not line:
+        return None
+    tty, _, cmd = line.partition(" ")
+    return tty.strip(), cmd.strip()
+
+
+def pid_state(pid):
+    """Claude Code's own record of a running process (~/.claude/sessions/<pid>.json), or {}."""
+    try:
+        with open(os.path.join(SESSIONS, f"{pid}.json"), encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return {}
+
+
+def rc_on(pid):
+    """Remote Control is on for this process: its record names a bridge (remote) session."""
+    return bool(pid_state(pid).get("bridgeSessionId"))
+
+
+def app_verdict(row, bridge):
+    """'view' when the app record shares the terminal's Remote Control session, 'separate' when it does not,
+    None when there is no live app record."""
+    if not row or row.get("isArchived"):
+        return None
+    return "view" if bridge and bridge in (row.get("bridgeSessionIds") or []) else "separate"
+
+
+def place_of(tty, cmd):
+    """'app' for the desktop app's own Claude process, 'terminal' for one that has a terminal."""
+    if "--output-format stream-json" in cmd and "/Claude/claude-code/" in cmd:
+        return "app"
+    return "terminal" if tty not in ("", "??", "?") else "other"
+
+
+def copies(sid, live=None):
+    out = []
+    for a in (agents() if live is None else live):
+        if a.get("sessionId") != sid:
+            continue
+        p = proc(a.get("pid"))
+        if not p:
+            continue
+        out.append({"pid": a["pid"], "place": place_of(*p), "tty": p[0], "status": a.get("status"),
+                    "cwd": a.get("cwd"), "name": a.get("name"), "remote_control": rc_on(a["pid"])})
+    return out
+
+
+def tmux_of(tty):
+    """The tmux session whose pane runs on this tty (ps prints ttys010; tmux prints /dev/ttys010)."""
+    tm = rs.tmux_bin()
+    if not tm or not tty:
+        return None
+    r = subprocess.run([tm, "list-panes", "-a", "-F", "#{session_name} #{pane_tty}"], capture_output=True, text=True)
+    for line in r.stdout.splitlines():
+        name, _, pt = line.rpartition(" ")
+        if pt == tty or pt.endswith("/" + tty):
+            return name
+    return None
+
+
+def screen(tmux_session):
+    r = subprocess.run([rs.tmux_bin(), "capture-pane", "-p", "-S", "-400", "-t", tmux_session],
+                       capture_output=True, text=True)
+    return r.stdout
+
+
+def app_row(sid):
+    """The desktop app's record of this conversation (matched by cliSessionId), or None."""
+    for f in glob.glob(os.path.join(DESK, "*", "*", "local_*.json")):
+        try:
+            with open(f, encoding="utf-8") as fh:
+                d = json.load(fh)
+        except Exception:
+            continue
+        if sid in (d.get("cliSessionId"), (d.get("sessionId") or "")[len("local_"):]):
+            return d
+    return None
+
+
+def status(sid):
+    row = app_row(sid)
+    out = {"session": sid, "copies": copies(sid),
+           "app_session": None if not row else {"id": row.get("sessionId"), "archived": bool(row.get("isArchived")),
+                                                "remote_control_switch": bool(row.get("remoteControlUserEnabled"))}}
+    for c in out["copies"]:
+        if c["place"] == "terminal":
+            c["tmux"] = tmux_of(c["tty"])
+    return out
+
+
+def target_for(places, asked):
+    """Where to move: what --to says, else the other place from the one it runs in now."""
+    if asked:
+        if asked not in ("app", "terminal"):
+            raise rs.Fail("--to takes app or terminal")
+        return asked
+    if places == {"app"}:
+        return "terminal"
+    if places == {"terminal"}:
+        return "app"
+    raise rs.Fail(f"cannot tell where to move it (it runs in: {', '.join(sorted(places)) or 'nowhere'}); "
+                  f"pass --to app|terminal")
+
+
+# ---------- the move (the background worker) ----------
+
+def log(msg, path):
+    with open(path, "a", encoding="utf-8") as f:
+        f.write(time.strftime("%Y-%m-%d %H:%M:%S ") + msg + "\n")
+
+
+def wait_idle(pid, wait, logf):
+    end, idle = time.time() + wait, 0
+    while time.time() < end:
+        if not proc(pid):
+            return True
+        st = next((a.get("status") for a in agents() if a.get("pid") == pid), None)
+        idle = idle + 1 if st == "idle" else 0
+        if idle >= IDLE_CHECKS:
+            return True
+        time.sleep(POLL)
+    log(f"gave up: pid {pid} not idle after {wait} s", logf)
+    return False
+
+
+def stop(c, logf):
+    t = tmux_of(c["tty"]) if c["place"] == "terminal" else None
+    try:
+        os.kill(c["pid"], 15)
+    except ProcessLookupError:
+        pass
+    for _ in range(40):
+        if not proc(c["pid"]):
+            break
+        time.sleep(0.5)
+    if proc(c["pid"]):
+        raise rs.Fail(f"pid {c['pid']} did not stop")
+    if t:
+        subprocess.run([rs.tmux_bin(), "kill-session", "-t", t], capture_output=True)
+    log(f"stopped the {c['place']} copy (pid {c['pid']}{', tmux ' + t if t else ''})", logf)
+
+
+def run(cmd, logf):
+    r = subprocess.run(cmd, capture_output=True, text=True, stdin=subprocess.DEVNULL, timeout=600)
+    out = (r.stdout + r.stderr).strip()
+    log(f"$ {' '.join(shlex.quote(x) for x in cmd)} -> rc {r.returncode}: {out[-400:]}", logf)
+    return r.returncode, out
+
+
+def wait_copy(sid, place, timeout=90):
+    end = time.time() + timeout
+    while time.time() < end:
+        cs = [c for c in copies(sid) if c["place"] == place]
+        if cs:
+            return cs[0]
+        time.sleep(2)
+    return None
+
+
+def to_terminal(sid, folder, a, logf):
+    cmd = [sys.executable, os.path.join(BIN, "claude-open"), folder, "--resume", sid]
+    rc, out = run(cmd + (["--tmux"] if "--tmux" in a else []), logf)
+    if rc != 0:
+        return False, f"claude-open failed: {out[-200:]}"
+    c = wait_copy(sid, "terminal")
+    if not c:
+        return False, "no terminal copy appeared in 90 s"
+    t, end, on = None, time.time() + 60, False
+    while time.time() < end and not on:
+        t = t or tmux_of(c["tty"])
+        on = rc_on(c["pid"]) or (bool(t) and RC_LINE in screen(t))
+        if not on:
+            time.sleep(2)
+    if not on:
+        return False, f"the terminal copy (pid {c['pid']}) runs, but Remote Control is not on (tmux {t})"
+    if "--hello" in a:
+        tm = rs.tmux_bin()
+        subprocess.run([tm, "send-keys", "-t", t, "-l",
+                        "switch-app-terminal: this conversation moved here. Reply in one line: where do you run now?"])
+        time.sleep(1)
+        subprocess.run([tm, "send-keys", "-t", t, "Enter"])
+    stopped, end = 0, time.time() + GUARD_S
+    while time.time() < end:
+        for x in copies(sid):
+            if x["place"] == "app" and x["status"] == "idle":
+                stop(x, logf)
+                stopped += 1
+        time.sleep(POLL)
+    note = f"; stopped {stopped} copy the app started again by itself" if stopped else ""
+    if not rc_on(c["pid"]):
+        return False, f"terminal (pid {c['pid']}) runs, but Remote Control dropped during the {GUARD_S:.0f} s check"
+    row = app_row(sid)
+    verdict = app_verdict(row, pid_state(c["pid"]).get("bridgeSessionId"))
+    if verdict == "view":
+        note += f"; the app session {row['sessionId']} is its Remote Control view: kept"
+    elif verdict == "separate":
+        ARCHIVE.append(row["sessionId"])
+        note += f"; the app session {row['sessionId']} is separate: archive it"
+    return True, f"terminal (pid {c['pid']}, tmux {t}), Remote Control on{note}"
+
+
+def to_app(sid, logf):
+    rc, out = run([sys.executable, os.path.join(BIN, "claude-desk"), "resume", sid], logf)
+    if rc != 0:
+        return False, f"claude-desk failed: {out[-200:]}"
+    c = wait_copy(sid, "app")
+    if not c:
+        return False, "no app copy appeared in 90 s"
+    end = time.time() + 30
+    while time.time() < end and not rc_on(c["pid"]):
+        time.sleep(2)
+    if not rc_on(c["pid"]) and "Remote Control on" not in out and "already on" not in out:
+        return False, f"the app copy (pid {c['pid']}) runs, but Remote Control was not confirmed: {out[-200:]}"
+    return True, f"desktop app (pid {c['pid']}), Remote Control on"
+
+
+def worker(sid, target, a):
+    os.makedirs(STATE, exist_ok=True)
+    logf = os.path.join(STATE, f"switch-{sid}.log")
+    log(f"start: to the {target}", logf)
+    try:
+        before = copies(sid)
+        folder = (before[0]["cwd"] if before else None) or (app_row(sid) or {}).get("cwd")
+        if not folder:
+            raise rs.Fail("cannot tell the session's folder")
+        wait = int(a[a.index("--wait") + 1]) if "--wait" in a else 900
+        for c in [c for c in before if c["place"] != target]:
+            if not wait_idle(c["pid"], wait, logf):
+                raise rs.Fail(f"the {c['place']} copy (pid {c['pid']}) never went idle; nothing moved")
+            if proc(c["pid"]):
+                stop(c, logf)
+            else:
+                log(f"the {c['place']} copy (pid {c['pid']}) already stopped", logf)
+        ok, msg = to_terminal(sid, folder, a, logf) if target == "terminal" else to_app(sid, logf)
+        left = [c for c in copies(sid) if c["place"] != target]
+        if ok and left:
+            ok, msg = False, msg + f"; but a copy still runs in the {left[0]['place']} (pid {left[0]['pid']})"
+    except Exception as e:  # every failure ends up in the result file
+        ok, msg = False, str(e)
+    summary = f"switch-app-terminal: {'moved to the ' + msg if ok else 'FAILED: ' + msg}"
+    log(summary, logf)
+    with open(os.path.join(STATE, f"switch-{sid}.json"), "w", encoding="utf-8") as f:
+        json.dump({"session": sid, "to": target, "ok": ok, "detail": msg, "archive": ARCHIVE, "at": time.strftime("%Y-%m-%d %H:%M:%S"),
+                   "log": logf}, f, indent=2)
+    notify = rs.setting("NOTIFY")
+    if notify:
+        try:
+            subprocess.run(shlex.split(notify) + [summary], capture_output=True, timeout=60)
+        except Exception as e:
+            log(f"notify failed: {e}", logf)
+
+
+# ---------- command line ----------
+
+def opt(a, name):
+    return a[a.index(name) + 1] if name in a and a.index(name) + 1 < len(a) else None
+
+
+def main():
+    a = sys.argv[1:]
+    if a and a[0] in ("-h", "--help"):
+        print(__doc__)
+        return
+    sid = opt(a, "--session") or os.environ.get("CLAUDE_CODE_SESSION_ID")
+    if not sid:
+        raise rs.Fail("no session: run it inside a Claude Code session, or pass --session <id>")
+    if a and a[0] == "status":
+        rs.print_json(status(sid))
+        return
+    if a and a[0] == "last":
+        p = os.path.join(STATE, f"switch-{sid}.json")
+        print(open(p, encoding="utf-8").read() if os.path.exists(p) else "{}")
+        return
+    if a and a[0] == "_worker":
+        worker(sid, opt(a, "--to"), a)
+        return
+    if not rs.is_mac():
+        raise rs.Fail("macOS only (it drives the Claude desktop app and terminal windows).")
+    now = copies(sid)
+    places = {c["place"] for c in now}
+    target = target_for(places, opt(a, "--to"))
+    plan = f"move {sid} from the {', '.join(sorted(places)) or 'nowhere'} to the {target}"
+    if "--dry-run" in a:
+        print("would " + plan)
+        return
+    os.makedirs(STATE, exist_ok=True)
+    out = open(os.path.join(STATE, f"switch-{sid}.log"), "a")
+    rest = [x for i, x in enumerate(a) if x != "--to" and (i == 0 or a[i - 1] != "--to")]
+    subprocess.Popen([sys.executable, os.path.realpath(__file__), "_worker", "--session", sid, "--to", target] + rest,
+                     stdin=subprocess.DEVNULL, stdout=out, stderr=out, start_new_session=True)
+    print(f"started: {plan}. It moves once this session is idle, then checks Remote Control.")
+    if "app" in places and target == "terminal":
+        print("Do not archive the app session yet: `last` says whether it is this conversation's Remote Control "
+              "view (keep it) or a separate session (archive it).")
+    print(f"Result: switch-app-terminal last --session {sid}")
+
+
+if __name__ == "__main__":
+    try:
+        main()
+    except rs.Fail as e:
+        sys.exit(f"switch-app-terminal: {e}")

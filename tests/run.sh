@@ -21,7 +21,7 @@ case "$(uname -s)" in
     bash "$R/install.sh" --prefix "$P" --dry-run >/dev/null
     [ ! -e "$P/claude-open" ] && ok "--dry-run changes nothing" || bad "--dry-run installed something"
     bash "$R/install.sh" --prefix "$P" >/dev/null || bad "install exit $?"
-    for c in claude-open claude-fork claude-desk; do
+    for c in claude-open claude-fork claude-desk switch-app-terminal; do
       [ "$(readlink "$P/$c")" = "$R/bin/$c" ] && ok "$c linked" || bad "$c not linked"
     done
     "$P/claude-open" --help >/dev/null 2>&1 && ok "linked claude-open runs" || bad "linked claude-open does not run"

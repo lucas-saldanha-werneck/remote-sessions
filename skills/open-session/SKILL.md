@@ -14,6 +14,7 @@ Finding folders and sessions goes through `claude-open`. It prints JSON; never r
 |---|---|
 | `claude-desk resume <id>` | opens the session in the desktop app: the app session that holds that id, or else it imports the terminal session into the app first. Then it turns Remote Control on. `--dry-run` only says which |
 | `claude-desk new <folder>` | starts a new session in the desktop app in that folder (creates the folder if missing) and turns Remote Control on |
+| `switch-app-terminal` | run inside a session: moves it to the other place (app → terminal, terminal → app), keeps Remote Control on and checks it. Returns at once; `switch-app-terminal last` prints the result. Archive only app sessions the result lists under `archive` |
 
 | Command | What it does |
 |---|---|

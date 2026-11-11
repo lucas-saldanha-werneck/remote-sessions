@@ -12,7 +12,7 @@ REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PREFIX="$HOME/.local/bin"
 DATA="${XDG_DATA_HOME:-$HOME/.local/share}/remote-sessions"
 DRY=0; FORCE=0; UNINSTALL=0
-CMDS="claude-open claude-fork claude-desk"
+CMDS="claude-open claude-fork claude-desk switch-app-terminal"
 
 while [ $# -gt 0 ]; do
   case "$1" in
