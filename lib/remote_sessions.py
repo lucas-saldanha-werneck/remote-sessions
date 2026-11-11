@@ -320,7 +320,13 @@ def score(query, cand):
 
 def resolve(root, query, create=False, dry_run=False):
     """Approximate name -> path relative to the root ("." = the root). Fails when nothing is close
-    or two names are equally close."""
+    or two names are equally close. A full path (/..., ~/...) under the root is taken as that folder."""
+    full = os.path.expanduser(query.strip())
+    if os.path.isabs(full):
+        real, real_root = os.path.realpath(full), os.path.realpath(root)
+        if real != real_root and not real.startswith(real_root + os.sep):
+            raise Fail(f"'{query.strip()}' is outside the projects root ({root}). Give a folder under it.")
+        query = os.path.relpath(real, real_root).replace(os.sep, "/")  # "." for the root itself; "/" as everywhere here
     query = query.strip().strip("/\\")
     if query in (".", ""):
         return "."

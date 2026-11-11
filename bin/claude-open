@@ -9,7 +9,8 @@
   claude-open --projects [folder]
 
 <approx-name> is matched against folders under the projects root: "clinet/invntory" finds
-client/inventory-app. "." means the root itself.
+client/inventory-app. "." means the root itself. A full path (/..., ~/...) to a folder under the
+root is taken as that folder.
 
   --create        create the folder when nothing close exists (uses the name as typed)
   --dry-run       print the folder and the command; open nothing

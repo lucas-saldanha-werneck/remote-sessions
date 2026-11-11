@@ -150,6 +150,21 @@ class TestOpen(Base):
         self.assertNotEqual(r.returncode, 0)
         self.assertIn("nothing close to 'zzzzqqq'", r.stderr)
 
+    def test_full_path_under_the_root(self):
+        self.tree()
+        r = self.run_cmd("claude-open", os.path.join(self.root, "beta", "sub"), "--list")
+        self.assertEqual(json.loads(r.stdout)["folder"], "beta/sub")   # a full path is that folder, not a name to guess
+        r = self.run_cmd("claude-open", self.root + "/", "--list")
+        self.assertEqual(json.loads(r.stdout)["folder"], ".")          # the root itself
+        r = self.run_cmd("claude-open", os.path.join(self.root, "alpha"), "--tmux", "--dry-run")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("folder: alpha\n", r.stdout)
+        r = self.run_cmd("claude-open", self.tmp, "--list")            # a full path outside the root: a clear error
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("is outside the projects root", r.stderr)
+        r = self.run_cmd("claude-open", os.path.join(self.root, "zzzzqqq"), "--list")
+        self.assertIn("nothing close to 'zzzzqqq'", r.stderr)          # under the root but missing: as before
+
     def test_ambiguous_name(self):
         os.makedirs(os.path.join(self.root, "notes-old"))
         os.makedirs(os.path.join(self.root, "notes-new"))
