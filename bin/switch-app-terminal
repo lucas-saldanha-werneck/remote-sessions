@@ -15,7 +15,9 @@ background and returns at once, because the session must stop before it can reop
   3. reopens the same conversation: `claude-open <folder> --resume <id>` (a terminal window, or a
      detached tmux session with --tmux), or `claude-desk resume <id>` (the desktop app),
   4. checks: one copy runs, in the new place, and Remote Control is on (the copy's
-     ~/.claude/sessions/<pid>.json has a bridgeSessionId),
+     ~/.claude/sessions/<pid>.json has a bridgeSessionId). In the app, a session just brought in may refuse
+     Remote Control until it has run a turn there: the worker waits up to 10 minutes (your first message
+     there, or the rc-auto plugin, turns it on), pressing the switch again each minute,
   5. for 120 s after a move to the terminal, stops any idle copy the desktop app starts by itself
      (the app starts the session shown on screen again when its window gets focus),
   6. writes the result (`last`) and runs REMOTE_SESSIONS_NOTIFY with a one-line summary, if set.
@@ -45,6 +47,7 @@ SESSIONS = rs.expand(os.path.join(rs.claude_dir(), "sessions"))
 IDLE_CHECKS = 3
 POLL = float(os.environ.get("REMOTE_SESSIONS_SWITCH_POLL", "5"))
 ARCHIVE = []  # separate app sessions the caller must archive
+RC_WAIT_S = float(os.environ.get("REMOTE_SESSIONS_SWITCH_RC_WAIT", "600"))
 GUARD_S = float(os.environ.get("REMOTE_SESSIONS_SWITCH_GUARD", "120"))
 
 
@@ -292,16 +295,24 @@ def to_terminal(sid, folder, a, logf):
 
 def to_app(sid, logf):
     rc, out = run([sys.executable, os.path.join(BIN, "claude-desk"), "resume", sid], logf)
-    if rc != 0:
+    if rc != 0 and "imported into the app" not in out and "opened:" not in out:
         return False, f"claude-desk failed: {out[-200:]}"
     c = wait_copy(sid, "app")
     if not c:
         return False, "no app copy appeared in 90 s"
-    end = time.time() + 30
+    # A session just brought into the app may refuse Remote Control until it has run a turn there ("Remote Control
+    # requires an active session"). Wait for it (the rc-auto plugin, or the user, turns it on after the first
+    # message), pressing the switch again now and then.
+    end, next_try = time.time() + RC_WAIT_S, time.time() + 60
     while time.time() < end and not rc_on(c["pid"]):
-        time.sleep(2)
-    if not rc_on(c["pid"]) and "Remote Control on" not in out and "already on" not in out:
-        return False, f"the app copy (pid {c['pid']}) runs, but Remote Control was not confirmed: {out[-200:]}"
+        if time.time() >= next_try:
+            run([sys.executable, os.path.join(BIN, "claude-desk"), "resume", sid], logf)
+            next_try = time.time() + 60
+        time.sleep(POLL)
+        c = wait_copy(sid, "app", timeout=10) or c
+    if not rc_on(c["pid"]):
+        return False, (f"the session runs in the desktop app (pid {c['pid']}), but Remote Control is off after "
+                       f"{RC_WAIT_S / 60:.0f} min: send one message in it there, then turn Remote Control on")
     return True, f"desktop app (pid {c['pid']}), Remote Control on"
 
 
