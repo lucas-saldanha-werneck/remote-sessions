@@ -262,6 +262,21 @@ class TestOpen(Base):
         self.assertIn("SKIP_SECRETS=1 ", c[i + 8])
         self.assertNotIn("osascript", self.calls())
 
+    @POSIX_ONLY
+    def test_tmux_keeps_shell_only_on_error(self):
+        """Clean exit closes the tmux session; a failed command leaves a shell to read the error."""
+        self.tree()
+        self.run_cmd("claude-open", "alpha", "--tmux")
+        c = self.calls().split("\n")
+        tail = c[c.index("new-session") + 8].rsplit("; ", 3)
+        tail = "; ".join(tail[-3:])
+        self.assertTrue(tail.startswith('rc=$?; [ "$rc" -ne 0 ] && exec'), tail)
+        probe = tail.replace('exec "${SHELL:-/bin/sh}" -l', "echo KEPT")
+        for code, kept in ((0, False), (3, True)):
+            out = subprocess.run(["/bin/sh", "-c", f"(exit {code}); {probe}"], capture_output=True, text=True)
+            self.assertEqual(out.returncode, code)
+            self.assertEqual("KEPT" in out.stdout, kept)
+
     def test_unknown_terminal(self):
         self.tree()
         r = self.run_cmd("claude-open", "alpha", env={"REMOTE_SESSIONS_TERMINAL": "kitty"})

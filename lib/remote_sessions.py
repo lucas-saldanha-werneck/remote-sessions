@@ -688,8 +688,9 @@ def tmux_session_name(base):
 
 
 def start_tmux(session, path, script):
-    """Detached tmux session running `script` with /bin/sh; the pane keeps a login shell afterwards."""
-    keep_shell = 'exec "${SHELL:-/bin/sh}" -l'
+    """Detached tmux session running `script` with /bin/sh. A clean exit (code 0) closes the session;
+    after an error the pane keeps a login shell so the message stays readable."""
+    keep_shell = 'rc=$?; [ "$rc" -ne 0 ] && exec "${SHELL:-/bin/sh}" -l; exit "$rc"'
     subprocess.run([tmux_bin(), "new-session", "-d", "-s", session, "-c", path] +
                    run_shell() + [script + "; " + keep_shell], check=True)
 
