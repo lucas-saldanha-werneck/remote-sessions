@@ -45,7 +45,7 @@ In Claude Code:
 
 ```
 /plugin marketplace add lucas-saldanha-werneck/claude-plugins
-/plugin install remote-sessions@lucas-plugins
+/plugin install remote-sessions@lucas-tools
 ```
 
 The plugin puts `claude-open`, `claude-fork` and `claude-desk` on Claude's PATH. To use them in your own terminal too:
@@ -148,7 +148,7 @@ The command typed into the new window runs under `/bin/sh` by default, so it wor
 ## Uninstall
 
 ```
-/plugin uninstall remote-sessions@lucas-plugins
+/plugin uninstall remote-sessions@lucas-tools
 ./install.sh --uninstall                     # removes only the links it created and the built helper
 ```
 

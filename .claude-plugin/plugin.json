@@ -1,6 +1,6 @@
 {
   "name": "remote-sessions",
-  "version": "0.3.1",
+  "version": "0.3.2",
   "description": "Open, resume or fork Claude Code sessions on your computer from your phone.",
   "author": {
     "name": "Lucas Saldanha Werneck",
