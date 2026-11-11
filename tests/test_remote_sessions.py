@@ -262,6 +262,7 @@ class TestOpen(Base):
         self.assertIn("SKIP_SECRETS=1 ", c[i + 8])
         self.assertNotIn("osascript", self.calls())
 
+    @POSIX_ONLY
     def test_tmux_keeps_shell_only_on_error(self):
         """Clean exit closes the tmux session; a failed command leaves a shell to read the error."""
         self.tree()
