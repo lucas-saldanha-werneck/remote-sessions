@@ -4,9 +4,9 @@ Open, resume and fork Claude Code sessions on your computer while you are away f
 
 In the mobile app, Remote Control only lists sessions that are already running, and `/resume` and fork are not available. This plugin works from any session you already have open: ask it to open another project, and it starts a new terminal window on the computer with that session and Remote Control on, so it shows up in the app a few seconds later.
 
-- **`open-session` skill + `claude-open`**: pick project, folder and session from short numbered lists (made for a phone screen), then open a new or a past session in a new window.
+- **`open-session` skill + `claude-open`**: pick project, folder and session from short numbered lists (made for a phone screen), then open a new or a past session in a new window, or (macOS) in the Claude desktop app. It asks which each time.
 - **`fork-session` skill + `claude-fork`**: fork the current session into an independent copy, in its own window, with Remote Control on.
-- **`claude-desk`** (macOS): reopen a Claude desktop app session and switch its Remote Control on.
+- **`claude-desk`** (macOS): reopen a Claude desktop app session, or bring a terminal session into the app, and switch its Remote Control on.
 
 ## Example
 
@@ -36,6 +36,7 @@ claude-open notes --tmux --name "weekly"     # detached tmux session, no window
 claude-open notes --tmux --teams --prompt "/plan"   # agent teams on for this session only
 claude-fork --name "try another way"         # inside a session: fork it
 claude-desk --list                           # macOS: desktop app sessions
+claude-desk resume <id>                      # macOS: open a session (from claude-open --list) in the desktop app
 ```
 
 ## Install

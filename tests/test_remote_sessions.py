@@ -550,7 +550,23 @@ class TestDesk(Base):
             write(os.path.join(self.desk, "acct", "org", f"local_{i}.json"), json.dumps({
                 "sessionId": f"local_0000000{i}-0000-0000-0000-000000000000", "title": title,
                 "cwd": os.path.join(self.tmp, "Projects", title.lower()), "lastActivityAt": (1000 + i) * 1000,
-                "isArchived": archived, "remoteControlUserEnabled": rc}))
+                "isArchived": archived, "remoteControlUserEnabled": rc,
+                "cliSessionId": f"c11{i}0000-0000-0000-0000-000000000000"}))
+
+    def test_resume_dry_run(self):
+        # by the terminal session id the app keeps for it, by the local id, and one the app does not hold
+        for cli, want in (("c1100000-0000-0000-0000-000000000000", "would open local_00000000-"),
+                          ("00000001-0000-0000-0000-000000000000", "would open local_00000001-"),
+                          ("c1120000-0000-0000-0000-000000000000", "would import CLI session c1120000-"),
+                          ("aaaaaaaa-0000-0000-0000-000000000000", "would import CLI session aaaaaaaa-")):
+            r = self.run_cmd("claude-desk", "resume", cli, "--dry-run")
+            self.assertEqual(r.returncode, 0, r.stderr)
+            self.assertIn(want, r.stdout, cli)
+
+    def test_resume_needs_an_id(self):
+        r = self.run_cmd("claude-desk", "resume", "inventory")
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("usage: claude-desk resume", r.stderr)
 
     def test_list(self):
         r = self.run_cmd("claude-desk", "--list")
