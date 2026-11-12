@@ -947,6 +947,173 @@ class TestDeskApp(unittest.TestCase):
         src = open(os.path.join(BIN, "claude-desk"), encoding="utf-8").read()
         self.assertLess(src.index("except NoRC"), src.index("except rs.Fail"))
 
+    def test_rs03_nothing_pressed_when_another_session_is_shown(self):
+        self.log = "setFocusedSession: sessionId=local_other\n"
+        with unittest.mock.patch.object(self.m, "ax_press", lambda: "ax"):
+            with self.assertRaises(self.m.NoRC):
+                self.m.prepare(self.SID, 0, ["--mode", "Bypass permissions"])
+        self.assertFalse(any("pick" in c for c in self.calls), self.calls)
+        self.assertFalse(any(c[0] == "AXCheckBox" and c[2:] for c in self.calls), self.calls)
+        self.assertEqual(self.ui["mode"], "Manual")
+
+
+# ---------- audit round 2 ----------
+
+FAKE_TMUX_DUP = '''#!/bin/sh
+# records like FAKE_RECORDER; the first new-session fails with "duplicate session"
+{ echo "== $(basename "$0")"; for a in "$@"; do printf '%s\\n' "$a"; done; } >> "$FAKE_LOG"
+if [ "$1" = "new-session" ] && [ ! -e "$FAKE_LOG.dup" ]; then
+  : > "$FAKE_LOG.dup"; echo "duplicate session: $4" >&2; exit 1
+fi
+exit 0
+'''
+
+FAKE_TMUX_FAIL = '''#!/bin/sh
+{ echo "== $(basename "$0")"; for a in "$@"; do printf '%s\\n' "$a"; done; } >> "$FAKE_LOG"
+[ "$1" = "new-session" ] && { echo "server exited unexpectedly" >&2; exit 1; }
+exit 0
+'''
+
+
+class TestAudit2(Base):
+    SID = "12345678-aaaa-bbbb-cccc-1234567890ab"
+
+    def new_sessions(self):
+        c = self.calls().split("\n")
+        return [c[i + 3] for i, x in enumerate(c) if x == "new-session"]
+
+    def test_rs01_tmux_name_keeps_the_unique_suffix(self):
+        n = rs.tmux_session_name("claude-Pessoal/AI-Tools/remote-sessions-and-more", "1731400000")
+        self.assertTrue(n.endswith("-1731400000"), n)
+        self.assertLessEqual(len(n), 40)
+        self.assertTrue(n.startswith("claude-Pessoal"), n)
+        self.assertEqual(rs.tmux_session_name("x", ""), "x")
+        self.assertEqual(rs.tmux_session_name("", ""), "claude")
+
+    @POSIX_ONLY
+    def test_rs01_long_folder_tmux_name_ends_with_timestamp(self):
+        os.makedirs(os.path.join(self.root, "a-very-long-project-folder-name-for-tmux"))
+        r = self.run_cmd("claude-open", "a-very-long-project-folder-name-for-tmux", "--tmux")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertRegex(self.new_sessions()[0], r"-\d{10}$")
+
+    @POSIX_ONLY
+    def test_rs01_rs09_duplicate_name_retries_with_a_new_one(self):
+        write(os.path.join(self.fakebin, "tmux"), FAKE_TMUX_DUP, 0o755)
+        r = self.run_cmd("claude-fork", self.SID, env={"REMOTE_SESSIONS_TERMINAL": "tmux"})
+        self.assertEqual(r.returncode, 0, r.stderr)
+        names = self.new_sessions()
+        self.assertEqual(len(names), 2, names)
+        self.assertNotEqual(names[0], names[1])
+        self.assertIn(f"tmux: {names[1]}", r.stdout)
+
+    @POSIX_ONLY
+    def test_rs09_tmux_failure_is_a_clean_error(self):
+        write(os.path.join(self.fakebin, "tmux"), FAKE_TMUX_FAIL, 0o755)
+        for cmd in (["claude-fork", self.SID], ["claude-open", ".", "--tmux"]):
+            r = self.run_cmd(*cmd, env={"REMOTE_SESSIONS_TERMINAL": "tmux"})
+            self.assertNotEqual(r.returncode, 0)
+            self.assertNotIn("Traceback", r.stderr)
+            self.assertIn("server exited unexpectedly", r.stderr)
+
+    def test_rs04_relative_dotdot_cannot_leave_the_root(self):
+        for q in ("../../tmp/x", "alpha/../../x", ".."):
+            with self.assertRaises(rs.Fail, msg=q):
+                rs.resolve(self.root, q, create=True, dry_run=True)
+        r = self.run_cmd("claude-open", "../escape", "--create", "--list")
+        self.assertNotEqual(r.returncode, 0)
+        self.assertFalse(os.path.exists(os.path.join(self.tmp, "escape")))
+
+    def test_rs13_prompt_with_resume_is_not_the_remote_control_name(self):
+        self.session("alpha", "a1111111-0000-0000-0000-000000000001", first="x")
+        r = self.run_cmd("claude-open", "alpha", "--resume", "last", "--prompt", "say hi", "--dry-run")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertNotIn("--remote-control 'say hi'", r.stdout)
+        self.assertIn("'say hi'", r.stdout)
+        self.assertIn("--remote-control", r.stdout)
+
+    def test_rs06_desk_new_respects_dry_run(self):
+        r = self.run_cmd("claude-desk", "new", "dry-folder", "--dry-run")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("would", r.stdout)
+        self.assertFalse(os.path.exists(os.path.join(self.root, "dry-folder")))
+        self.assertNotIn("claude -p", self.calls())
+
+    @POSIX_ONLY
+    def test_rs12_config_is_created_private(self):
+        dest = os.path.join(self.tmp, "cfgdir", "config")
+        self.assertEqual(rs.seed_config(dest, os.path.join(ROOT, "config.example")), dest)
+        self.assertEqual(stat.S_IMODE(os.stat(dest).st_mode) & 0o077, 0)
+
+
+class TestSwitchAudit2(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.m = load_switch()
+
+    def setUp(self):
+        self.d = tempfile.mkdtemp(prefix="switch-test-")
+        self.addCleanup(shutil.rmtree, self.d, True)
+        p = unittest.mock.patch.object(self.m, "STATE", self.d)
+        p.start()
+        self.addCleanup(p.stop)
+
+    def test_rs02_stop_kills_only_the_pane(self):
+        calls = []
+        fake_run = lambda cmd, **k: calls.append(cmd) or subprocess.CompletedProcess(cmd, 0, "", "")
+        with unittest.mock.patch.object(self.m, "proc", lambda pid: None), \
+                unittest.mock.patch.object(self.m, "pane_of", lambda tty: ("claude-x", "%7")), \
+                unittest.mock.patch.object(self.m.os, "kill", lambda *a: None), \
+                unittest.mock.patch.object(self.m.rs, "tmux_bin", lambda: "tmux"), \
+                unittest.mock.patch.object(self.m.subprocess, "run", fake_run):
+            self.m.stop({"pid": 5, "place": "terminal", "tty": "ttys009"}, os.path.join(self.d, "l"))
+        self.assertIn(["tmux", "kill-pane", "-t", "%7"], calls)
+        self.assertFalse(any("kill-session" in c for c in calls), calls)
+
+    def test_rs02_pane_of_parses_list_panes(self):
+        out = "claude-a %1 /dev/ttys001\nwork %4 /dev/ttys009\n"
+        with unittest.mock.patch.object(self.m.rs, "tmux_bin", lambda: "tmux"), \
+                unittest.mock.patch.object(self.m.subprocess, "run",
+                                           lambda cmd, **k: subprocess.CompletedProcess(cmd, 0, out, "")):
+            self.assertEqual(self.m.pane_of("ttys009"), ("work", "%4"))
+            self.assertEqual(self.m.tmux_of("ttys001"), "claude-a")
+            self.assertIsNone(self.m.pane_of("ttys002"))
+
+    def test_rs05_failed_move_reopens_the_source(self):
+        term = {"pid": 5, "place": "terminal", "tty": "ttys009", "cwd": "/p", "status": "idle"}
+        seq = iter([[term]])
+        ran = []
+        with unittest.mock.patch.object(self.m, "copies", lambda sid, live=None: next(seq, [])), \
+                unittest.mock.patch.object(self.m, "wait_idle", lambda *a: True), \
+                unittest.mock.patch.object(self.m, "proc", lambda pid: ("ttys009", "claude")), \
+                unittest.mock.patch.object(self.m, "stop", lambda c, logf: None), \
+                unittest.mock.patch.object(self.m, "to_app", lambda sid, logf: (False, "app did not answer")), \
+                unittest.mock.patch.object(self.m, "run", lambda cmd, logf: ran.append(cmd) or (0, "")), \
+                unittest.mock.patch.object(self.m.rs, "setting", lambda *a: None):
+            self.m.worker("sid-1", "app", ["_worker"])
+        self.assertTrue(any("claude-open" in " ".join(c) and "--resume" in c and "sid-1" in c for c in ran), ran)
+        with open(os.path.join(self.d, "switch-sid-1.json"), encoding="utf-8") as f:
+            res = json.load(f)
+        self.assertFalse(res["ok"])
+        self.assertIn("reopened", res["detail"])
+
+    def test_rs08_one_move_per_session(self):
+        self.assertTrue(self.m.take_lock("sid-2"))
+        self.assertFalse(self.m.take_lock("sid-2"))       # held by a live pid (this one)
+        self.m.release_lock("sid-2")
+        self.assertTrue(self.m.take_lock("sid-2"))
+        self.m.release_lock("sid-2")
+        with open(os.path.join(self.d, "switch-sid-3.lock"), "w") as f:
+            f.write("999999999")                          # stale: that pid does not exist
+        self.assertTrue(self.m.take_lock("sid-3"))
+        self.m.release_lock("sid-3")
+
+    def test_rs10_session_id_is_validated(self):
+        r = subprocess.run([PY, os.path.join(BIN, "switch-app-terminal"), "last", "--session", "../../etc/x"],
+                           capture_output=True, text=True)
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("does not look like a session id", r.stderr)
+
 
 if __name__ == "__main__":
     unittest.main()

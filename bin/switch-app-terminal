@@ -11,7 +11,8 @@ Run from inside a session it moves that session (CLAUDE_CODE_SESSION_ID). It sta
 background and returns at once, because the session must stop before it can reopen elsewhere:
 
   1. the worker waits until the session is idle (3 checks in a row, 5 s apart; --wait, default 900 s),
-  2. stops its process (in a terminal, also the tmux session it ran in),
+  2. stops its process (in a terminal, also the tmux pane it ran in; if the next step fails, it reopens
+     the conversation where it was),
   3. reopens the same conversation: `claude-open <folder> --resume <id>` (a terminal window, or a
      detached tmux session with --tmux), or `claude-desk resume <id>` (the desktop app),
   4. checks: one copy runs, in the new place, and Remote Control is on (the copy's
@@ -34,7 +35,7 @@ After a move to the terminal, the app's record of the conversation is checked:
 Settings: REMOTE_SESSIONS_NOTIFY (a command; the summary is its last argument), plus the claude-open and
 claude-desk ones.
 """
-import glob, json, os, shlex, subprocess, sys, time
+import glob, json, os, re, shlex, subprocess, sys, time
 
 REPO = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
 sys.path.insert(0, os.path.join(REPO, "lib"))
@@ -46,6 +47,7 @@ DESK = rs.expand(rs.setting("DESKTOP_SESSIONS", "~/Library/Application Support/C
 RC_LINE = "remote-control is active"
 SESSIONS = rs.expand(os.path.join(rs.claude_dir(), "sessions"))
 IDLE_CHECKS = 3
+SID_RE = re.compile(r"[A-Za-z0-9_-]{1,128}")
 POLL = float(os.environ.get("REMOTE_SESSIONS_SWITCH_POLL", "5"))
 ARCHIVE = []  # separate app sessions the caller must archive
 RC_WAIT_S = float(os.environ.get("REMOTE_SESSIONS_SWITCH_RC_WAIT", "600"))
@@ -116,17 +118,26 @@ def copies(sid, live=None):
     return out
 
 
-def tmux_of(tty):
-    """The tmux session whose pane runs on this tty (ps prints ttys010; tmux prints /dev/ttys010)."""
+def pane_of(tty):
+    """(tmux session, pane id) of the pane that runs on this tty (ps prints ttys010; tmux prints
+    /dev/ttys010), or None."""
     tm = rs.tmux_bin()
     if not tm or not tty:
         return None
-    r = subprocess.run([tm, "list-panes", "-a", "-F", "#{session_name} #{pane_tty}"], capture_output=True, text=True)
+    r = subprocess.run([tm, "list-panes", "-a", "-F", "#{session_name} #{pane_id} #{pane_tty}"],
+                       capture_output=True, text=True)
     for line in r.stdout.splitlines():
-        name, _, pt = line.rpartition(" ")
+        rest, _, pt = line.rpartition(" ")
+        name, _, pane = rest.rpartition(" ")
         if pt == tty or pt.endswith("/" + tty):
-            return name
+            return name, pane
     return None
+
+
+def tmux_of(tty):
+    """The tmux session whose pane runs on this tty, or None."""
+    p = pane_of(tty)
+    return p[0] if p else None
 
 
 def screen(tmux_session):
@@ -219,7 +230,8 @@ def wait_idle(pid, wait, logf):
 
 
 def stop(c, logf):
-    t = tmux_of(c["tty"]) if c["place"] == "terminal" else None
+    p = pane_of(c["tty"]) if c["place"] == "terminal" else None
+    t = p[0] if p else None
     try:
         os.kill(c["pid"], 15)
     except ProcessLookupError:
@@ -230,8 +242,9 @@ def stop(c, logf):
         time.sleep(0.5)
     if proc(c["pid"]):
         raise rs.Fail(f"pid {c['pid']} did not stop")
-    if t:
-        subprocess.run([rs.tmux_bin(), "kill-session", "-t", t], capture_output=True)
+    if p:  # only the pane the session ran in: other panes and windows of that tmux session stay (its last
+        # pane closes the session by itself)
+        subprocess.run([rs.tmux_bin(), "kill-pane", "-t", p[1]], capture_output=True)
     log(f"stopped the {c['place']} copy (pid {c['pid']}{', tmux ' + t if t else ''})", logf)
 
 
@@ -318,10 +331,90 @@ def to_app(sid, logf):
     return True, f"desktop app (pid {c['pid']}), Remote Control on"
 
 
+def reopen(sid, place, folder, a, logf):
+    """After a failed move: start the conversation again where it ran before. True when the command ran."""
+    if place == "terminal":
+        cmd = [sys.executable, os.path.join(BIN, "claude-open"), folder, "--resume", sid, "--force"]
+        cmd += ["--tmux"] if "--tmux" in a else []
+    elif place == "app":
+        cmd = [sys.executable, os.path.join(BIN, "claude-desk"), "resume", sid]
+    else:
+        return False
+    try:
+        rc, _ = run(cmd, logf)
+    except Exception as e:
+        log(f"reopen failed: {e}", logf)
+        return False
+    return rc in (0, 3)  # claude-desk exit 3 = open in the app, Remote Control off
+
+
+def lock_path(sid):
+    return os.path.join(STATE, f"switch-{sid}.lock")
+
+
+def take_lock(sid, pid=None):
+    """One move per session at a time: a lock file holding the pid of the move. A lock whose pid is gone is
+    stale and taken over. True when this call holds the lock."""
+    os.makedirs(STATE, exist_ok=True)
+    p = lock_path(sid)
+    for _ in range(2):
+        try:
+            fd = os.open(p, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        except FileExistsError:
+            try:
+                with open(p, encoding="utf-8") as f:
+                    held = int(f.read().strip() or 0)
+            except (OSError, ValueError):
+                held = 0
+            if held and pid_alive(held):
+                return False
+            try:
+                os.remove(p)
+            except OSError:
+                pass
+            continue
+        with os.fdopen(fd, "w") as f:
+            f.write(str(pid or os.getpid()))
+        return True
+    return False
+
+
+def set_lock_pid(sid, pid):
+    with open(lock_path(sid), "w", encoding="utf-8") as f:
+        f.write(str(pid))
+
+
+def release_lock(sid):
+    try:
+        os.remove(lock_path(sid))
+    except OSError:
+        pass
+
+
+def pid_alive(pid):
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    except (OSError, OverflowError):
+        return False
+    return True
+
+
 def worker(sid, target, a):
+    try:
+        _worker(sid, target, a)
+    finally:
+        release_lock(sid)
+
+
+def _worker(sid, target, a):
     os.makedirs(STATE, exist_ok=True)
     logf = os.path.join(STATE, f"switch-{sid}.log")
     log(f"start: to the {target}", logf)
+    stopped, folder = [], None
     try:
         before = copies(sid)
         folder = (before[0]["cwd"] if before else None) or (app_row(sid) or {}).get("cwd")
@@ -333,6 +426,7 @@ def worker(sid, target, a):
                 raise rs.Fail(f"the {c['place']} copy (pid {c['pid']}) never went idle; nothing moved")
             if proc(c["pid"]):
                 stop(c, logf)
+                stopped.append(c["place"])
             else:
                 log(f"the {c['place']} copy (pid {c['pid']}) already stopped", logf)
         ok, msg = to_terminal(sid, folder, a, logf) if target == "terminal" else to_app(sid, logf)
@@ -341,6 +435,19 @@ def worker(sid, target, a):
             ok, msg = False, msg + f"; but a copy still runs in the {left[0]['place']} (pid {left[0]['pid']})"
     except Exception as e:  # every failure ends up in the result file
         ok, msg = False, str(e)
+    if not ok and stopped and folder:
+        # the source copy was stopped, but the conversation did not come up in the new place: start it
+        # again where it was, unless some copy runs now
+        try:
+            running = copies(sid)
+        except Exception:
+            running = []
+        if not running:
+            back = stopped[0]
+            if reopen(sid, back, folder, a, logf):
+                msg += f"; reopened it in the {back}"
+            else:
+                msg += f"; could not reopen it in the {back}: run claude-open <folder> --resume {sid}"
     summary = f"switch-app-terminal: {'moved to the ' + msg if ok else 'FAILED: ' + msg}"
     log(summary, logf)
     with open(os.path.join(STATE, f"switch-{sid}.json"), "w", encoding="utf-8") as f:
@@ -368,6 +475,8 @@ def main():
     sid = opt(a, "--session") or os.environ.get("CLAUDE_CODE_SESSION_ID")
     if not sid:
         raise rs.Fail("no session: run it inside a Claude Code session, or pass --session <id>")
+    if not SID_RE.fullmatch(sid):  # it becomes part of file names under STATE
+        raise rs.Fail(f"'{sid}' does not look like a session id")
     if a and a[0] == "status":
         rs.print_json(status(sid))
         return
@@ -388,11 +497,17 @@ def main():
     if "--dry-run" in a:
         print("would " + plan)
         return
-    os.makedirs(STATE, exist_ok=True)
-    out = open(os.path.join(STATE, f"switch-{sid}.log"), "a")
-    rest = [x for i, x in enumerate(a) if x != "--to" and (i == 0 or a[i - 1] != "--to")]
-    subprocess.Popen([sys.executable, os.path.realpath(__file__), "_worker", "--session", sid, "--to", target] + rest,
-                     stdin=subprocess.DEVNULL, stdout=out, stderr=out, start_new_session=True)
+    if not take_lock(sid):
+        raise rs.Fail(f"a move of {sid} is already running; see: switch-app-terminal last --session {sid}")
+    try:
+        out = open(os.path.join(STATE, f"switch-{sid}.log"), "a")
+        rest = [x for i, x in enumerate(a) if x != "--to" and (i == 0 or a[i - 1] != "--to")]
+        w = subprocess.Popen([sys.executable, os.path.realpath(__file__), "_worker", "--session", sid, "--to", target]
+                             + rest, stdin=subprocess.DEVNULL, stdout=out, stderr=out, start_new_session=True)
+    except Exception:
+        release_lock(sid)
+        raise
+    set_lock_pid(sid, w.pid)  # the worker holds it now and removes it when it ends
     print(f"started: {plan}. It moves once this session is idle, then checks Remote Control.")
     if "app" in places and target == "terminal":
         print("Do not archive the app session yet: `last` says whether it is this conversation's Remote Control "

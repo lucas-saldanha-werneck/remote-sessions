@@ -113,17 +113,18 @@ def main():
         if sid in rs.open_ids() and "--force" not in flags:
             raise rs.Fail(f"session {sid[:8]} is already running in another terminal; Remote Control does "
                           f"not attach to a second copy. Use --force to open it anyway.")
-        # no name here: the resumed session keeps its title
-        claude_args = ["--resume", sid, "--remote-control"]
-        tname = f"claude-{label}-{sid[:8]}"
+        # no name here: the resumed session keeps its title. A --prompt goes before --remote-control, whose
+        # value is optional: right after it, the prompt would become the Remote Control name
+        claude_args = ["--resume", sid] + ([opts["--prompt"]] if opts.get("--prompt") else []) + ["--remote-control"]
+        tname = rs.tmux_session_name(f"claude-{label}", sid[:8])
     else:
         title = f"{label} · {opts['--name']}" if opts.get("--name") else label
         if not dry:  # the title command is the user's program: a dry run does not run it
             title = rs.new_session_title(path, opts.get("--name") or "", title)
         claude_args = ["--remote-control", title] + (["-n", title] if opts.get("--name") else [])
-        tname = f"claude-{opts.get('--name') or label}-{int(time.time())}"
-    if opts.get("--prompt"):
-        claude_args.append(opts["--prompt"])
+        tname = rs.tmux_session_name(f"claude-{opts.get('--name') or label}", str(int(time.time())))
+        if opts.get("--prompt"):
+            claude_args.append(opts["--prompt"])
 
     try:
         kind = rs.pick_terminal("--tmux" in flags)
@@ -151,8 +152,7 @@ def main():
         return
     print(f"folder: {target}\ncommand: {script}")
     if kind == "tmux":
-        session = rs.tmux_session_name(tname)
-        rs.start_tmux(session, path, script)
+        session = rs.start_tmux(tname, path, script)
         if started_keepalive:
             rs.drop_keepalive()
         print(f"tmux: {session} (no window; attach with: tmux attach -t {session})")

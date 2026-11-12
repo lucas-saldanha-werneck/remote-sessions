@@ -37,6 +37,12 @@ case "$(uname -s)" in
     bash "$R/install.sh" --prefix "$P" --uninstall >/dev/null
     [ ! -e "$P/claude-open" ] && [ ! -e "$P/claude-fork" ] && ok "uninstall removed the links" || bad "links left"
     [ "$(cat "$P/claude-desk")" = "mine" ] && ok "uninstall kept the foreign file" || bad "uninstall removed foreign file"
+    if [ "$(id -u)" -ne 0 ]; then   # root ignores the read-only folder
+      RO="$W/ro-bin"; mkdir -p "$RO"; chmod 555 "$RO"
+      bash "$R/install.sh" --prefix "$RO" >/dev/null 2>&1; rc=$?
+      chmod 755 "$RO"
+      [ $rc -ne 0 ] && ok "failed link -> non-zero exit ($rc)" || bad "install into a read-only folder exited 0"
+    fi
     ;;
 esac
 

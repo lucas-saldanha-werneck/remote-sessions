@@ -5,10 +5,10 @@ macOS only.
   claude-desk --list [N]               JSON: N recent (not archived) desktop sessions: id, when, title, folder, rc
   claude-desk <id|text>                open the session and turn Remote Control on
   claude-desk <id|text> --no-rc        only open it
-  claude-desk new <folder> [--msg "text"] [--no-rc]
+  claude-desk new <folder> [--msg "text"] [--no-rc] [--dry-run]
                                        create the folder if missing, start a NEW desktop session in it and
                                        turn Remote Control on. <folder>: absolute, ~/..., or relative to the
-                                       projects root
+                                       projects root. --dry-run says what it would do
   claude-desk resume <id> [--no-rc] [--dry-run]
                                        open a session by the id `claude-open --list` prints: the desktop
                                        session that holds it, or else import that terminal session into the
@@ -271,13 +271,19 @@ def prepare(sid, pos, a):
         return
     wait_log(pos, f"Session {sid} warmed", 30)
     time.sleep(1.5)
+    # the switches press the first control with that name on screen: only when the app shows this session
     if mode:
-        set_mode(axbin, mode)
+        if focused(sid, pos):
+            set_mode(axbin, mode)
+        else:
+            print(f"permission mode NOT set to {mode}: the app does not show this session")
     if "--no-rc" not in a:
         rc_on(axbin, sid, pos)
 
 
 def rc_on(axbin, sid, pos):
+    if not focused(sid, pos):
+        raise NoRC("the app does not show this session (another one is on screen); nothing was pressed")
     code, out = press(axbin, check_only=True)  # AXValue 1 = already on: leave it
     if out.endswith("value: 1"):
         print("Remote Control was already on (not touched)")
@@ -326,6 +332,10 @@ def new_session(a):
         raise rs.Fail('usage: claude-desk new <folder> [--msg "text"] [--no-rc]')
     raw = a[1]
     folder = rs.expand(raw) if raw.startswith(("/", "~")) else os.path.join(rs.projects_root(), raw)
+    if "--dry-run" in a:
+        made = "" if os.path.isdir(folder) else "would create the folder, then "
+        print(f"{made}would start a new desktop session in {folder} (claude -p, then import into the app)")
+        return
     os.makedirs(folder, exist_ok=True)
     name = os.path.basename(folder)
     msg = a[a.index("--msg") + 1] if "--msg" in a and a.index("--msg") + 1 < len(a) else (
@@ -407,6 +417,9 @@ def main():
         return
     if a[0] == "resume":
         resume(a)
+        return
+    if a[0] == "new" and "--dry-run" in a:
+        new_session(a)
         return
     if not rs.is_mac():
         raise rs.Fail("macOS only (it drives the Claude desktop app).")
