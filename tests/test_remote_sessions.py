@@ -29,6 +29,18 @@ exit 0
 '''
 
 
+# Safety net for the whole run: `open`, `osascript` and `tmux` on PATH are always fakes, also for code
+# loaded in-process (claude-desk, switch-app-terminal) and for subprocesses that inherit os.environ. No test
+# may start a real app (`open claude://...` would start the Claude desktop app with the test's HOME).
+GUARD_BIN = tempfile.mkdtemp(prefix="remote-sessions-guard-")
+GUARD_LOG = os.path.join(GUARD_BIN, "calls.log")
+for _name in ("open", "osascript", "tmux"):
+    with open(os.path.join(GUARD_BIN, _name), "w", encoding="utf-8", newline="\n") as _f:
+        _f.write('#!/bin/sh\necho "$(basename "$0") $*" >> "%s"\nexit 0\n' % GUARD_LOG.replace("\\", "/"))
+    os.chmod(os.path.join(GUARD_BIN, _name), 0o755)
+os.environ["PATH"] = GUARD_BIN + os.pathsep + os.environ.get("PATH", "")
+
+
 def write(path, text, mode=None):
     os.makedirs(os.path.dirname(path), exist_ok=True)
     with open(path, "w", encoding="utf-8", newline="\n") as f:
@@ -46,7 +58,7 @@ class Base(unittest.TestCase):
         self.fakebin = os.path.join(self.tmp, "fakebin")
         os.makedirs(self.root)
         write(os.path.join(self.tmp, "fake_claude.py"), FAKE_CLAUDE)
-        for name in ("osascript", "tmux"):
+        for name in ("osascript", "tmux", "open"):
             write(os.path.join(self.fakebin, name), FAKE_RECORDER, 0o755)
         self.env = {k: v for k, v in os.environ.items()
                     if not k.startswith(("REMOTE_SESSIONS_", "CLAUDE")) and k not in ("TMUX", "XDG_CONFIG_HOME")}
@@ -843,6 +855,29 @@ def load_desk():
     return mod
 
 
+class TestNoRealApp(unittest.TestCase):
+    """No test path reaches the real `open` / `osascript`: they resolve to fakes."""
+
+    @POSIX_ONLY
+    def test_open_and_osascript_resolve_to_fakes(self):
+        self.assertEqual(shutil.which("open"), os.path.join(GUARD_BIN, "open"))
+        self.assertEqual(rs.osascript(), os.path.join(GUARD_BIN, "osascript"))
+        m = load_desk()
+        m.open_url("claude://resume?session=test")
+        with open(GUARD_LOG, encoding="utf-8") as f:
+            self.assertIn("open claude://resume?session=test", f.read())
+
+    @POSIX_ONLY
+    def test_base_env_has_a_fake_open_first(self):
+        b = Base()
+        b.setUp()
+        try:
+            first = b.env["PATH"].split(os.pathsep)[0]
+            self.assertTrue(os.access(os.path.join(first, "open"), os.X_OK))
+        finally:
+            b.tearDown()
+
+
 class TestDeskApp(unittest.TestCase):
     """claude-desk inside the app: permission mode, the first turn, Remote Control. ax-press and the app log
     are faked; nothing real is pressed."""
@@ -858,7 +893,9 @@ class TestDeskApp(unittest.TestCase):
         self.calls = []
         self.ui = {"mode": "Manual", "rc": 0, "prompt": "", "turns": 0, "focused": True}
         p = unittest.mock.patch
-        for name, fn in (("log_since", lambda pos: self.log), ("log_size", lambda: 0),
+        def no_open(url):
+            raise AssertionError(f"a test tried to open {url}")
+        for name, fn in (("open_url", no_open), ("log_since", lambda pos: self.log), ("log_size", lambda: 0),
                          ("ax", self.fake_ax), ("app_pid", lambda: "1"),
                          ("wait_log", lambda pos, needle, t: needle in self.log)):
             patcher = p.object(self.m, name, fn)
