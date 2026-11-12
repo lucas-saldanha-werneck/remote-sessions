@@ -52,13 +52,15 @@ for c in $CMDS; do
     if [ $FORCE -eq 0 ]; then echo "skipped $t: a different file exists there (use --force to replace it)"; rc=1; continue; fi
     run rm -f "$t"
   fi
-  run chmod +x "$REPO/bin/$c"
-  run ln -s "$REPO/bin/$c" "$t" && echo "installed $t -> $REPO/bin/$c"
+  run chmod +x "$REPO/bin/$c" || { echo "failed: chmod +x $REPO/bin/$c" >&2; rc=1; }
+  if run ln -s "$REPO/bin/$c" "$t"; then echo "installed $t -> $REPO/bin/$c"
+  else echo "failed: could not link $t" >&2; rc=1; fi
 done
 
 if [ "$(uname -s)" = "Darwin" ]; then
   if command -v swiftc >/dev/null 2>&1; then
-    run mkdir -p "$DATA" && run swiftc -O -o "$DATA/ax-press" "$REPO/tools/ax-press.swift" && echo "built $DATA/ax-press"
+    if run mkdir -p "$DATA" && run swiftc -O -o "$DATA/ax-press" "$REPO/tools/ax-press.swift"; then echo "built $DATA/ax-press"
+    else echo "failed: could not build $DATA/ax-press" >&2; rc=1; fi
   else
     echo "note: swiftc not found; claude-desk will open sessions but not turn Remote Control on (xcode-select --install)"
   fi

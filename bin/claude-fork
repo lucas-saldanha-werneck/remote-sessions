@@ -67,7 +67,7 @@ def main():
                              "--remote-control", shlex.quote(name), "-n", shlex.quote(name)])
     script = rs.unset_snippet() + f"cd {shlex.quote(folder)} && " + claude
     tmux = rs.tmux_bin()
-    session = "fork-" + time.strftime("%H%M%S")
+    session = rs.tmux_session_name("fork", time.strftime("%H%M%S"))
     want = (rs.setting("TERMINAL", "auto") or "auto").lower()
     window = None
     if want != "tmux" and rs.osascript():
@@ -85,7 +85,7 @@ def main():
         return
 
     if tmux:
-        rs.start_tmux(session, folder, script)
+        session = rs.start_tmux(session, folder, script)
         if started_keepalive:
             rs.drop_keepalive()
         print(f"tmux: {session}")

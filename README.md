@@ -149,7 +149,7 @@ a terminal window (iTerm, Terminal.app, or a detached tmux session with `--tmux`
 the app. It returns at once and leaves a worker in the background, because the session has to stop before
 it can reopen. The worker:
 
-1. waits until the session is idle, then stops it (and the tmux session it ran in);
+1. waits until the session is idle, then stops it (and the tmux pane it ran in; other panes stay); if the new place fails, it reopens it where it was;
 2. reopens the same conversation with `claude-open --resume` or `claude-desk resume`;
 3. checks that one copy runs, in the new place, with Remote Control on. Claude Code writes each running
    session to `~/.claude/sessions/<pid>.json`; a `bridgeSessionId` there means Remote Control is on;

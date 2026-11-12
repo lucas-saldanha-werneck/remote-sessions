@@ -135,7 +135,7 @@ def seed_config(dest=None, starter=None):
             data = fh.read()
         os.makedirs(os.path.dirname(os.path.abspath(dest)), exist_ok=True)
         # O_EXCL: a file that appears between the check and here is left alone
-        fd = os.open(dest, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_BINARY", 0), 0o644)
+        fd = os.open(dest, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_BINARY", 0), 0o600)
         try:
             with os.fdopen(fd, "wb") as fh:
                 fh.write(data)
@@ -328,6 +328,11 @@ def resolve(root, query, create=False, dry_run=False):
             raise Fail(f"'{query.strip()}' is outside the projects root ({root}). Give a folder under it.")
         query = os.path.relpath(real, real_root).replace(os.sep, "/")  # "." for the root itself; "/" as everywhere here
     query = query.strip().strip("/\\")
+    # a relative name must stay under the root too ("../../tmp/x"); lexical, so symlinked projects still work
+    norm_root = os.path.normpath(os.path.abspath(root))
+    joined = os.path.normpath(os.path.join(norm_root, query))
+    if joined != norm_root and not joined.startswith(norm_root.rstrip(os.sep) + os.sep):
+        raise Fail(f"'{query}' is outside the projects root ({root}). Give a folder under it.")
     if query in (".", ""):
         return "."
     exact = os.path.join(root, query)
@@ -683,16 +688,37 @@ def drop_keepalive():
     subprocess.run([tmux_bin(), "kill-session", "-t", KEEPALIVE], capture_output=True)
 
 
-def tmux_session_name(base):
-    return re.sub(r"[^A-Za-z0-9_-]+", "-", base).strip("-")[:40] or "claude"
+TMUX_NAME_MAX = 40
+
+
+def tmux_session_name(base, unique=""):
+    """A tmux-safe session name of at most 40 chars. `unique` (a timestamp, an id prefix) is always kept
+    whole: only `base` is shortened, so two sessions of the same long folder never get the same name."""
+    clean = lambda x: re.sub(r"[^A-Za-z0-9_-]+", "-", x or "").strip("-")
+    u, b = clean(unique)[:TMUX_NAME_MAX], clean(base)
+    if not u:
+        return b[:TMUX_NAME_MAX] or "claude"
+    b = b[:max(0, TMUX_NAME_MAX - len(u) - 1)].rstrip("-")
+    return f"{b}-{u}" if b else u
 
 
 def start_tmux(session, path, script):
     """Detached tmux session running `script` with /bin/sh. A clean exit (code 0) closes the session;
-    after an error the pane keeps a login shell so the message stays readable."""
+    after an error the pane keeps a login shell so the message stays readable. When the name is taken,
+    tries name-2 ... name-9. Returns the name used; any other tmux failure raises Fail with tmux's message."""
     keep_shell = 'rc=$?; [ "$rc" -ne 0 ] && exec "${SHELL:-/bin/sh}" -l; exit "$rc"'
-    subprocess.run([tmux_bin(), "new-session", "-d", "-s", session, "-c", path] +
-                   run_shell() + [script + "; " + keep_shell], check=True)
+    name = session
+    for n in range(1, 10):
+        if n > 1:
+            name = tmux_session_name(session, str(n))
+        r = subprocess.run([tmux_bin(), "new-session", "-d", "-s", name, "-c", path] +
+                           run_shell() + [script + "; " + keep_shell], capture_output=True, text=True)
+        if r.returncode == 0:
+            return name
+        err = (r.stderr or r.stdout or "").strip()
+        if "duplicate session" not in err:
+            raise Fail(f"tmux new-session failed ({r.returncode}): {err[-300:] or 'no message'}")
+    raise Fail(f"tmux new-session failed: the names {session} to {name} are all taken")
 
 
 if __name__ == "__main__":   # the plugin's SessionStart hook: python3 lib/remote_sessions.py --seed
