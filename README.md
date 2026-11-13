@@ -6,6 +6,7 @@
 [![SkillEvaluator](https://img.shields.io/badge/SkillEvaluator-8%2F8-brightgreen)](https://github.com/NVIDIA/SkillEvaluator)
 [![fork-session score](https://img.shields.io/badge/fork--session%20score-98.8%20A-brightgreen)](https://github.com/NVIDIA/SkillEvaluator)
 [![open-session score](https://img.shields.io/badge/open--session%20score-95.2%20A-brightgreen)](https://github.com/NVIDIA/SkillEvaluator)
+[![plugin score (proposal)](https://img.shields.io/badge/plugin%20score%20(proposal)-93.8%20A-brightgreen)](https://github.com/NVIDIA/SkillEvaluator/issues/508)
 
 Open, resume and fork Claude Code sessions on your computer while you are away from it, from the Claude app on your phone.
 
