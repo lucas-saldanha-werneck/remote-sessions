@@ -10,7 +10,7 @@
 
 Open, resume and fork Claude Code sessions on your computer while you are away from it, from the Claude app on your phone.
 
-[![remote-sessions demo: tap to open the video](docs/demo-poster.png)](https://lucas-saldanha-werneck.github.io/remote-sessions/demo.mp4)
+[![remote-sessions demo: tap to open the video](docs/demo-poster.gif)](https://lucas-saldanha-werneck.github.io/remote-sessions/demo.mp4)
 
 <table>
 <tr>
