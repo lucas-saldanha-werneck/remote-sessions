@@ -116,7 +116,7 @@ The list shows only folders that **have Claude Code conversations** in them or b
 ## Troubleshooting
 
 - `warning: the precheck ... failed`: pass it on in one line; the session started in the fallback mode the user configured.
-- "projects root was not found": ask for the folder and write `ROOT=<folder>` to the remote-sessions config file.
+- "projects root was not found": ask for the folder and offer to write `ROOT=<folder>` to `~/.config/remote-sessions/config`.
 - No `interactive` entry in `claude agents --json` after about 10 seconds: say it did not start and paste what `claude-open` printed.
 
 ## Examples
