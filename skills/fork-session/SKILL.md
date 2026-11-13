@@ -1,11 +1,20 @@
 ---
 name: fork-session
-description: Fork the current Claude Code session into an independent copy (new session id, the original untouched) that starts connected to Remote Control in its own window. Built for the phone, where the Claude app has no fork button. Use when the user says "/fork-session", "fork this session", "fork it", "duplicate the session", "open a copy of this session", or "I want to try another direction without losing this one". Accepts an optional name ("fork as <name>").
+description: Fork the current Claude Code session into an independent copy (new session id, the original untouched) that starts connected to Remote Control in its own window. Built for the phone, where the Claude app has no fork button. Use when the user says "/fork-session", "fork this session", "fork it", "duplicate the session", "open a copy of this session", or "I want to try another direction without losing this one". Accepts an optional name ("fork as try-redis").
+metadata:
+  author: Lucas Saldanha Werneck <lucas@2olhares.com>
 ---
 
 # fork-session
 
 Creates a COPY of the current session without stopping or changing the original. The copy gets a new session id and inherits all context up to the last completed turn. It starts with `--remote-control`, so it shows up in the Claude app's session list within seconds: this is how you fork from a phone, by asking here.
+
+## Instructions
+
+1. Take the current session id and a name for the copy.
+2. Run `claude-fork --name "<name>"` from this session's folder.
+3. Wait about 15 seconds and verify the copy is alive before saying it worked.
+4. Report the copy's name; to discard it, kill its tmux session.
 
 ## Steps
 
@@ -26,3 +35,9 @@ Creates a COPY of the current session without stopping or changing the original.
 6. **To discard a copy**: `tmux kill-session -t fork-HHMMSS` (the attached window closes by itself; confirm with `pgrep -fl -- --fork-session`), or exit the copy normally.
 
 Known limitations (phantom tasks, last turn missing): see `references/limitations.md`.
+
+## Examples
+
+- User: "/fork-session". Claude runs `claude-fork` with a name like `fork <topic>`, checks the copy is running and says it should appear in the app list shortly.
+- User: "fork it as try-redis". Claude runs `claude-fork --name "try-redis"`.
+- User: "I want to try another direction without losing this one". Same as a fork request.

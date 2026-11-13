@@ -2,6 +2,8 @@
 name: open-session
 description: Open or resume a Claude Code session of another project folder on this computer, in a new terminal window or in the Claude desktop app, with Remote Control on, picking project, folder and session from numbered lists. Built for use from the phone through Remote Control, where only already-open sessions show up and /resume does not work. Use when the user says "/open-session", "open the project X", "open a session in X", "resume the X session", "continue that conversation in X", or asks to open or resume Claude in a folder that has no open session.
 argument-hint: "[folder] [last|id] [app|terminal]"
+metadata:
+  author: Lucas Saldanha Werneck <lucas@2olhares.com>
 ---
 
 # open-session: open or resume a session in another folder
@@ -27,6 +29,13 @@ Finding folders and sessions goes through `claude-open`. It prints JSON; never r
 `<folder>` accepts an approximate name ("invntory" finds `client/inventory-app`); `.` is the projects root. Add `--tmux` when the user wants no window (nothing steals focus on the computer).
 
 If `claude-open` says the projects root was not found, ask the user which folder holds their projects and offer to write `ROOT=<folder>` to `~/.config/remote-sessions/config`.
+
+## Instructions
+
+1. Find the folder with `claude-open --projects` (numbered lists; skip steps the argument answers).
+2. Pick a session with `claude-open <folder> --list 10`, or start a new one.
+3. Ask where to open it (desktop app or terminal) unless already said.
+4. Open it with `claude-open` or `claude-desk`, then verify it started and that Remote Control is on.
 
 ## Flow
 
@@ -85,3 +94,9 @@ The list shows only folders that **have Claude Code conversations** in them or b
 - iTerm or Terminal must be usable on the computer with a logged-in user (`claude-open` drives them with AppleScript). A sleeping computer fails; say so instead of retrying. The first run may show a macOS "allow automation" prompt on the computer.
 - A resumed session keeps its title; do not pass `--name` with `--resume`.
 - Sessions with no user message are skipped by `--list` (opened and closed empty).
+
+## Examples
+
+- User: "/open-session". Claude shows a numbered list of project folders, then sessions, then where to open it.
+- User: "/open-session inventory last app". Claude resumes the latest session of the matching folder in the desktop app and checks Remote Control.
+- User: "open a session in client in the terminal". Claude opens a new terminal window with Remote Control on and confirms with `claude agents --json`.
