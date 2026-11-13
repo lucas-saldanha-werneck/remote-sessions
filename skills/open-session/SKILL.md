@@ -2,11 +2,17 @@
 name: open-session
 description: Open or resume a Claude Code session of another project folder on this computer, in a new terminal window or in the Claude desktop app, with Remote Control on, picking project, folder and session from numbered lists. Built for use from the phone through Remote Control, where only already-open sessions show up and /resume does not work. Use when the user says "/open-session", "open the project X", "open a session in X", "resume the X session", "continue that conversation in X", or asks to open or resume Claude in a folder that has no open session.
 argument-hint: "[folder] [last|id] [app|terminal]"
+version: "0.5.5"
 metadata:
   author: Lucas Saldanha Werneck <lucas@2olhares.com>
+  tags: [resume, remote-control, sessions]
 ---
 
 # open-session: open or resume a session in another folder
+
+## Purpose
+
+Start or resume, from the phone, a session of another project folder on this computer, with Remote Control on, so it shows up in the app's Code tab.
 
 Why: in the Claude mobile app, Remote Control only lists sessions that are already running, and `/resume` is not available there. This skill runs from any open session and starts, on this computer, the chosen session with Remote Control on, so it appears in the app's Code tab. It opens either in a new terminal window (iTerm, Terminal.app, or a detached tmux session) or in the Claude desktop app (macOS). The permission mode is whatever the user's settings say.
 
@@ -94,6 +100,24 @@ The list shows only folders that **have Claude Code conversations** in them or b
 - iTerm or Terminal must be usable on the computer with a logged-in user (`claude-open` drives them with AppleScript). A sleeping computer fails; say so instead of retrying. The first run may show a macOS "allow automation" prompt on the computer.
 - A resumed session keeps its title; do not pass `--name` with `--resume`.
 - Sessions with no user message are skipped by `--list` (opened and closed empty).
+
+## Prerequisites
+
+- Claude Code with Remote Control and Python 3.8+; `claude-open` (from the plugin or the repo installer).
+- Desktop app route: macOS, the Claude desktop app running and the computer unlocked (`claude-desk`).
+- Terminal route: iTerm or Terminal.app on macOS, or tmux (the Linux default).
+
+## Limitations
+
+- A sleeping computer cannot open windows; say so instead of retrying.
+- Remote Control cannot be switched on by `claude-desk` while the screen is locked.
+- Sessions with no user message are not listed.
+
+## Troubleshooting
+
+- `warning: the precheck ... failed`: pass it on in one line; the session started in the fallback mode the user configured.
+- "projects root was not found": ask for the folder and write `ROOT=<folder>` to the remote-sessions config file.
+- No `interactive` entry in `claude agents --json` after about 10 seconds: say it did not start and paste what `claude-open` printed.
 
 ## Examples
 

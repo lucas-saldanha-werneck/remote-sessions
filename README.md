@@ -2,7 +2,10 @@
 
 [![CI](https://github.com/lucas-saldanha-werneck/remote-sessions/actions/workflows/test.yml/badge.svg)](https://github.com/lucas-saldanha-werneck/remote-sessions/actions/workflows/test.yml)
 [![License](https://img.shields.io/github/license/lucas-saldanha-werneck/remote-sessions)](LICENSE)
-[![Version](https://img.shields.io/badge/version-0.5.4-blue)](CHANGELOG.md)
+[![Version](https://img.shields.io/badge/version-0.5.5-blue)](CHANGELOG.md)
+[![SkillEvaluator](https://img.shields.io/badge/SkillEvaluator-8%2F8-brightgreen)](https://github.com/NVIDIA/SkillEvaluator)
+[![fork-session score](https://img.shields.io/badge/fork--session%20score-98.8%20A-brightgreen)](https://github.com/NVIDIA/SkillEvaluator)
+[![open-session score](https://img.shields.io/badge/open--session%20score-95.2%20A-brightgreen)](https://github.com/NVIDIA/SkillEvaluator)
 
 Open, resume and fork Claude Code sessions on your computer while you are away from it, from the Claude app on your phone.
 

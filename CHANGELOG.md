@@ -2,6 +2,10 @@
 
 Versions are the `version` in `.claude-plugin/plugin.json`. Newest first.
 
+## 0.5.5 (2026-11-13)
+
+- Skill schema and score: add version and tags, a Purpose section, Prerequisites, Limitations and Troubleshooting to both skills; add SkillEvaluator badges.
+
 ## 0.5.4 (2026-11-13)
 
 - Add author metadata, Instructions and Examples to SKILL.md; bump to 0.5.4.
