@@ -1,6 +1,20 @@
 # remote-sessions
 
+[![CI](https://github.com/lucas-saldanha-werneck/remote-sessions/actions/workflows/test.yml/badge.svg)](https://github.com/lucas-saldanha-werneck/remote-sessions/actions/workflows/test.yml)
+[![License](https://img.shields.io/github/license/lucas-saldanha-werneck/remote-sessions)](LICENSE)
+[![Version](https://img.shields.io/badge/version-0.5.4-blue)](CHANGELOG.md)
+
 Open, resume and fork Claude Code sessions on your computer while you are away from it, from the Claude app on your phone.
+
+[![remote-sessions demo: tap to open the video](https://github.com/user-attachments/assets/037e8588-4be3-4d88-a0a7-efb8556022c6)](https://lucas-saldanha-werneck.github.io/remote-sessions/demo.mp4)
+
+<table>
+<tr>
+<td align="center"><img src="https://github.com/user-attachments/assets/9f012c69-47d5-458a-8fdb-e52e1c14a75c" alt="Opening a project by number from the phone" width="320"><br>From your phone</td>
+<td align="center"><img src="https://github.com/user-attachments/assets/3d92694f-3fbe-41fe-bd2b-ab6cd017e952" alt="The resumed session in a terminal, with the phone showing it" width="320"><br>In the terminal</td>
+<td align="center"><img src="https://github.com/user-attachments/assets/dfe79162-5c69-4503-b92b-4084dce39e0d" alt="Summary: every session within reach" width="320"><br>The idea in short</td>
+</tr>
+</table>
 
 In the mobile app, Remote Control only lists sessions that are already running, and `/resume` and fork are not available. This plugin works from any session you already have open: ask it to open another project, and it starts a new terminal window on the computer with that session and Remote Control on, so it shows up in the app a few seconds later.
 
@@ -190,3 +204,7 @@ Your config in `~/.config/remote-sessions/` is left in place.
 MIT
 
 Built with Claude Code
+
+## Security
+
+See [SECURITY.md](SECURITY.md) for how to report a vulnerability and what this plugin accesses.
