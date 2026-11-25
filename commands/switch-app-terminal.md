@@ -6,6 +6,7 @@ allowed-tools: Bash(switch-app-terminal:*)
 
 Move this conversation to the other place (desktop app ↔ terminal window) with `switch-app-terminal`.
 
+0. In T3 Code (`T3CODE_THREAD_ID` is set) this does not apply: the command refuses. Say so in one short line and stop.
 1. Run, exactly: `switch-app-terminal $ARGUMENTS`
 2. Reply in one or two short lines, in the user's language: where it goes (from its "started:" line), and that it
    moves once this turn ends. If it printed an error, show it and stop.

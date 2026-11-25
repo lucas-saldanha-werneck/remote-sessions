@@ -2,13 +2,15 @@
 name: open-session
 description: Open or resume a Claude Code session of another project folder on this computer, in a new terminal window or in the Claude desktop app, with Remote Control on, picking project, folder and session from numbered lists. Built for use from the phone through Remote Control, where only already-open sessions show up and /resume does not work. Use when the user says "/open-session", "open the project X", "open a session in X", "resume the X session", "continue that conversation in X", or asks to open or resume Claude in a folder that has no open session.
 argument-hint: "[folder] [last|id] [app|terminal]"
-version: "0.5.5"
+version: "0.5.6"
 metadata:
   author: Lucas Saldanha Werneck <lucas@2olhares.com>
   tags: [resume, remote-control, sessions]
 ---
 
 # open-session: open or resume a session in another folder
+
+> **Not in T3 Code.** If `T3CODE_THREAD_ID` is set (or `CLAUDE_CODE_ENTRYPOINT` is `t3-code`), this skill does not apply: it depends on Remote Control and the Claude app, and T3 Code has its own phone app. Say so in one short line and stop.
 
 ## Purpose
 

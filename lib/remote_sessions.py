@@ -560,6 +560,31 @@ def is_mac():
     return sys.platform == "darwin"
 
 
+T3_MESSAGE = ("not available in T3 Code: Remote Control and moving a session between the Claude app and a "
+              "terminal do not apply there (T3 Code has its own phone app).")
+
+
+def in_t3_code(env=None):
+    """True when Claude Code runs inside T3 Code (pingdotgg/t3code): it sets T3CODE_THREAD_ID and
+    CLAUDE_CODE_ENTRYPOINT=t3-code. Those variables are inherited by child processes, so a tmux server or
+    terminal started from a T3 session would look like T3 forever: a session that is clearly a terminal
+    (TMUX_PANE set, or stdin/stdout/stderr is a tty; the tty check only when `env` is not given) is not T3."""
+    explicit = env is not None
+    env = env if explicit else os.environ
+    if not (env.get("T3CODE_THREAD_ID") or env.get("CLAUDE_CODE_ENTRYPOINT") == "t3-code"):
+        return False
+    if env.get("TMUX_PANE"):
+        return False
+    if not explicit:
+        for fd in (0, 1, 2):
+            try:
+                if os.isatty(fd):
+                    return False
+            except (OSError, ValueError):
+                pass
+    return True
+
+
 def iterm_installed():
     return any(os.path.isdir(p) for p in ("/Applications/iTerm.app",
                                          os.path.expanduser("~/Applications/iTerm.app")))
@@ -722,6 +747,6 @@ def start_tmux(session, path, script):
 
 
 if __name__ == "__main__":   # the plugin's SessionStart hook: python3 lib/remote_sessions.py --seed
-    if "--seed" in sys.argv[1:]:
+    if "--seed" in sys.argv[1:] and not in_t3_code():
         seed_config()
     sys.exit(0)
