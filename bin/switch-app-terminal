@@ -472,6 +472,8 @@ def main():
     if a and a[0] in ("-h", "--help"):
         print(__doc__)
         return
+    if rs.in_t3_code():
+        raise rs.Fail(rs.T3_MESSAGE)
     sid = opt(a, "--session") or os.environ.get("CLAUDE_CODE_SESSION_ID")
     if not sid:
         raise rs.Fail("no session: run it inside a Claude Code session, or pass --session <id>")

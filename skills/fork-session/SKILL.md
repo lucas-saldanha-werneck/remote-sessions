@@ -9,6 +9,8 @@ metadata:
 
 # fork-session
 
+> **Not in T3 Code.** If `T3CODE_THREAD_ID` is set (or `CLAUDE_CODE_ENTRYPOINT` is `t3-code`), this skill does not apply: it depends on Remote Control and the Claude app, and T3 Code has its own phone app. Say so in one short line and stop.
+
 ## Purpose
 
 Fork the current session into an independent copy from the phone, where the Claude app has no fork button, and keep the original untouched.

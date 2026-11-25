@@ -560,6 +560,17 @@ def is_mac():
     return sys.platform == "darwin"
 
 
+T3_MESSAGE = ("not available in T3 Code: Remote Control and moving a session between the Claude app and a "
+              "terminal do not apply there (T3 Code has its own phone app).")
+
+
+def in_t3_code(env=None):
+    """True when Claude Code runs inside T3 Code (pingdotgg/t3code): it sets T3CODE_THREAD_ID and
+    CLAUDE_CODE_ENTRYPOINT=t3-code."""
+    env = os.environ if env is None else env
+    return bool(env.get("T3CODE_THREAD_ID")) or env.get("CLAUDE_CODE_ENTRYPOINT") == "t3-code"
+
+
 def iterm_installed():
     return any(os.path.isdir(p) for p in ("/Applications/iTerm.app",
                                          os.path.expanduser("~/Applications/iTerm.app")))
@@ -722,6 +733,6 @@ def start_tmux(session, path, script):
 
 
 if __name__ == "__main__":   # the plugin's SessionStart hook: python3 lib/remote_sessions.py --seed
-    if "--seed" in sys.argv[1:]:
+    if "--seed" in sys.argv[1:] and not in_t3_code():
         seed_config()
     sys.exit(0)

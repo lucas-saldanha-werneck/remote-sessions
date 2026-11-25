@@ -2,6 +2,10 @@
 
 Versions are the `version` in `.claude-plugin/plugin.json`. Newest first.
 
+## 0.5.6 (2026-11-25)
+
+- Do nothing in T3 Code (detected by `T3CODE_THREAD_ID` or entrypoint `t3-code`): the SessionStart hook is silent, `switch-app-terminal` refuses with a short message, and open-session and fork-session say they do not apply.
+
 ## 0.5.5 (2026-11-13)
 
 - Skills: add version and tags, a Purpose section, Prerequisites, Limitations and Troubleshooting; SkillEvaluator badges in the README.

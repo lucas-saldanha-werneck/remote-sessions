@@ -49,6 +49,11 @@ def write(path, text, mode=None):
         os.chmod(path, mode)
 
 
+def clean_env():
+    """The test run's variables without T3 Code's, so the suite passes when run inside T3 Code too."""
+    return {k: v for k, v in os.environ.items() if not k.startswith("T3CODE") and k != "CLAUDE_CODE_ENTRYPOINT"}
+
+
 class Base(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.mkdtemp(prefix="remote-sessions-test-")
@@ -61,7 +66,7 @@ class Base(unittest.TestCase):
         for name in ("osascript", "tmux", "open"):
             write(os.path.join(self.fakebin, name), FAKE_RECORDER, 0o755)
         self.env = {k: v for k, v in os.environ.items()
-                    if not k.startswith(("REMOTE_SESSIONS_", "CLAUDE")) and k not in ("TMUX", "XDG_CONFIG_HOME")}
+                    if not k.startswith(("REMOTE_SESSIONS_", "CLAUDE", "T3CODE")) and k not in ("TMUX", "XDG_CONFIG_HOME")}
         self.env.update({
             "HOME": self.tmp, "USERPROFILE": self.tmp,
             "REMOTE_SESSIONS_ROOT": self.root,
@@ -839,6 +844,8 @@ class TestSwitch(unittest.TestCase):
         self.assertIn("bridgeSessionIds", r.stdout)
         env = dict(os.environ)
         env.pop("CLAUDE_CODE_SESSION_ID", None)
+        env.pop("T3CODE_THREAD_ID", None)
+        env.pop("CLAUDE_CODE_ENTRYPOINT", None)
         r = subprocess.run([PY, os.path.join(BIN, "switch-app-terminal"), "status"], capture_output=True, text=True,
                            env=env)
         self.assertNotEqual(r.returncode, 0)
@@ -1147,9 +1154,35 @@ class TestSwitchAudit2(unittest.TestCase):
 
     def test_rs10_session_id_is_validated(self):
         r = subprocess.run([PY, os.path.join(BIN, "switch-app-terminal"), "last", "--session", "../../etc/x"],
-                           capture_output=True, text=True)
+                           capture_output=True, text=True, env=clean_env())
         self.assertNotEqual(r.returncode, 0)
         self.assertIn("does not look like a session id", r.stderr)
+
+
+class T3Code(Base):
+    """Inside T3 Code (T3CODE_THREAD_ID or entrypoint t3-code) the Remote Control parts do nothing."""
+
+    def test_detection(self):
+        self.assertTrue(rs.in_t3_code({"T3CODE_THREAD_ID": "abc"}))
+        self.assertTrue(rs.in_t3_code({"CLAUDE_CODE_ENTRYPOINT": "t3-code"}))
+        self.assertFalse(rs.in_t3_code({"CLAUDE_CODE_ENTRYPOINT": "cli"}))
+        self.assertFalse(rs.in_t3_code({}))
+
+    def test_switch_app_terminal_refuses(self):
+        for extra in ({"T3CODE_THREAD_ID": "abc"}, {"CLAUDE_CODE_ENTRYPOINT": "t3-code"}):
+            r = subprocess.run([PY, os.path.join(BIN, "switch-app-terminal"), "--to", "app", "--dry-run"],
+                               capture_output=True, text=True, env=dict(self.env, CLAUDE_CODE_SESSION_ID="abc-1", **extra))
+            self.assertEqual(r.returncode, 1)
+            self.assertIn("not available in T3 Code", r.stderr)
+            self.assertEqual(r.stdout, "")
+
+    def test_seed_hook_is_silent_and_writes_nothing(self):
+        env = dict(self.env, T3CODE_THREAD_ID="abc")
+        env.pop("REMOTE_SESSIONS_CONFIG")
+        r = subprocess.run([sys.executable, os.path.join(ROOT, "lib", "remote_sessions.py"), "--seed"],
+                           capture_output=True, text=True, env=env)
+        self.assertEqual((r.returncode, r.stdout, r.stderr), (0, "", ""))
+        self.assertFalse(os.path.exists(os.path.join(self.tmp, ".config")))
 
 
 if __name__ == "__main__":

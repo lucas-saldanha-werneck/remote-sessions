@@ -10,6 +10,8 @@ metadata:
 
 # open-session: open or resume a session in another folder
 
+> **Not in T3 Code.** If `T3CODE_THREAD_ID` is set (or `CLAUDE_CODE_ENTRYPOINT` is `t3-code`), this skill does not apply: it depends on Remote Control and the Claude app, and T3 Code has its own phone app. Say so in one short line and stop.
+
 ## Purpose
 
 Start or resume, from the phone, a session of another project folder on this computer, with Remote Control on, so it shows up in the app's Code tab.
