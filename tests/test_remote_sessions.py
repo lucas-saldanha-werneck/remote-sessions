@@ -1181,14 +1181,14 @@ class T3Code(Base):
 
     def test_switch_app_terminal_in_a_tmux_pane_is_not_refused_as_t3(self):
         r = subprocess.run([PY, os.path.join(BIN, "switch-app-terminal"), "--to", "app", "--dry-run"],
-                           capture_output=True, text=True, stdin=subprocess.DEVNULL,
+                           capture_output=True, text=True, input="",
                            env=dict(self.env, CLAUDE_CODE_SESSION_ID="abc-1", T3CODE_THREAD_ID="abc", TMUX_PANE="%1"))
         self.assertNotIn("T3 Code", r.stderr)
 
     def test_switch_app_terminal_refuses(self):
         for extra in ({"T3CODE_THREAD_ID": "abc"}, {"CLAUDE_CODE_ENTRYPOINT": "t3-code"}):
             r = subprocess.run([PY, os.path.join(BIN, "switch-app-terminal"), "--to", "app", "--dry-run"],
-                               capture_output=True, text=True, stdin=subprocess.DEVNULL,
+                               capture_output=True, text=True, input="",
                                env=dict(self.env, CLAUDE_CODE_SESSION_ID="abc-1", **extra))
             self.assertEqual(r.returncode, 1)
             self.assertIn("not available in T3 Code", r.stderr)
