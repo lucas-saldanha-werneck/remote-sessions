@@ -1,7 +1,7 @@
 ---
 name: fork-session
 description: Fork the current Claude Code session into an independent copy (new session id, the original untouched) that starts connected to Remote Control in its own window. Built for the phone, where the Claude app has no fork button. Use when the user says "/fork-session", "fork this session", "fork it", "duplicate the session", "open a copy of this session", or "I want to try another direction without losing this one". Accepts an optional name ("fork as try-redis").
-version: "0.5.5"
+version: "0.5.6"
 metadata:
   author: Lucas Saldanha Werneck <lucas@2olhares.com>
   tags: [fork, remote-control, sessions]
